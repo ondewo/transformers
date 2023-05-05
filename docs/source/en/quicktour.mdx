@@ -14,7 +14,7 @@ specific language governing permissions and limitations under the License.
 
 [[open-in-colab]]
 
-aaa Get up and running with 🤗 Transformers! Whether you're a developer or an everyday user, this quick tour will help you get started and show you how to use the [`pipeline`] for inference, load a pretrained model and preprocessor with an [AutoClass](./model_doc/auto), and quickly train a model with PyTorch or TensorFlow. If you're a beginner, we recommend checking out our tutorials or [course](https://huggingface.co/course/chapter1/1) next for more in-depth explanations of the concepts introduced here.
+Get up and running with 🤗 Transformers! Whether you're a developer or an everyday user, this quick tour will help you get started and show you how to use the [`pipeline`] for inference, load a pretrained model and preprocessor with an [AutoClass](./model_doc/auto), and quickly train a model with PyTorch or TensorFlow. If you're a beginner, we recommend checking out our tutorials or [course](https://huggingface.co/course/chapter1/1) next for more in-depth explanations of the concepts introduced here.
 
 Before you begin, make sure you have all the necessary libraries installed:
 
@@ -91,7 +91,7 @@ label: NEGATIVE, with score: 0.5309
 The [`pipeline`] can also iterate over an entire dataset for any task you like. For this example, let's choose automatic speech recognition as our task:
 
 ```py
->>> import torch, Hello
+>>> import torch
 >>> from transformers import pipeline
 
 >>> speech_recognizer = pipeline("automatic-speech-recognition", model="facebook/wav2vec2-base-960h")
