@@ -121,11 +121,16 @@ class CircleCIJob:
         )
 
         steps.append({"run": {"name": "Create `test-results` directory", "command": "mkdir test-results"}})
+
+        # Examples special case: we need to download NLTK files in advance to avoid cuncurrency issues
+        if "examples" in self.name:
+            steps.append({"run": {"name": "Download NLTK files", "command": """python -c "import nltk; nltk.download('punkt', quiet=True)" """}})
+
         test_command = ""
         if self.command_timeout:
             test_command = f"timeout {self.command_timeout} "
         # junit familiy xunit1 is necessary to support splitting on test name or class name with circleci split
-        test_command += f"python3 -m pytest -rsfE -p no:warnings -o junit_family=xunit1 --tb=short --junitxml=test-results/junit.xml -n {self.pytest_num_workers} " + " ".join(pytest_flags)
+        test_command += f"python3 -m pytest -rsfE -p no:warnings --tb=short -o junit_family=xunit1 --junitxml=test-results/junit.xml -n {self.pytest_num_workers} " + " ".join(pytest_flags)
 
         if self.parallelism == 1:
             if self.tests_to_run is None:
@@ -185,10 +190,6 @@ class CircleCIJob:
             steps.append({"store_artifacts": {"path": "tests.txt"}})
             steps.append({"store_artifacts": {"path": "splitted_tests.txt"}})
 
-            test_command = ""
-            if self.command_timeout:
-                test_command = f"timeout {self.command_timeout} "
-            test_command += f"python3 -m pytest -rsfE -p no:warnings --tb=short  -o junit_family=xunit1 --junitxml=test-results/junit.xml -n {self.pytest_num_workers} " + " ".join(pytest_flags)
             test_command += " $(cat splitted_tests.txt)"
         if self.marker is not None:
             test_command += f" -m {self.marker}"
@@ -248,7 +249,7 @@ torch_job = CircleCIJob(
     docker_image=[{"image": "huggingface/transformers-torch-light"}],
     install_steps=["uv venv && uv pip install ."],
     parallelism=6,
-    pytest_num_workers=16
+    pytest_num_workers=4
 )
 
 tokenization_job = CircleCIJob(
@@ -256,7 +257,7 @@ tokenization_job = CircleCIJob(
     docker_image=[{"image": "huggingface/transformers-torch-light"}],
     install_steps=["uv venv && uv pip install ."],
     parallelism=6,
-    pytest_num_workers=16
+    pytest_num_workers=4
 )
 
 
@@ -265,7 +266,7 @@ tf_job = CircleCIJob(
     docker_image=[{"image":"huggingface/transformers-tf-light"}],
     install_steps=["uv venv", "uv pip install -e."],
     parallelism=6,
-    pytest_num_workers=16,
+    pytest_num_workers=4,
 )
 
 
@@ -274,7 +275,7 @@ flax_job = CircleCIJob(
     docker_image=[{"image":"huggingface/transformers-jax-light"}],
     install_steps=["uv venv && uv pip install ."],
     parallelism=6,
-    pytest_num_workers=16
+    pytest_num_workers=4
 )
 
 

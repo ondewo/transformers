@@ -96,7 +96,7 @@ if stale_egg_info.exists():
 # 2. once modified, run: `make deps_table_update` to update src/transformers/dependency_versions_table.py
 _deps = [
     "Pillow>=10.0.1,<=15.0",
-    "accelerate>=0.21.0",
+    "accelerate>=0.26.0",
     "av==9.2.0",  # Latest version of PyAV (10.0.0) has issues with audio stream.
     "beautifulsoup4",
     "codecarbon==1.2.0",
@@ -128,16 +128,16 @@ _deps = [
     "kenlm",
     # Keras pin - this is to make sure Keras 3 doesn't destroy us. Remove or change when we have proper support.
     "keras>2.9,<2.16",
-    "keras-nlp>=0.3.1",
+    "keras-nlp>=0.3.1,<0.14.0",  # keras-nlp 0.14 doesn't support keras 2, see pin on keras.
     "librosa",
     "nltk",
     "natten>=0.14.6,<0.15.0",
-    "numpy>=1.17,<2.0",
+    "numpy>=1.17",
     "onnxconverter-common",
     "onnxruntime-tools>=1.4.2",
     "onnxruntime>=1.4.0",
     "opencv-python",
-    "optimum-benchmark>=0.2.0",
+    "optimum-benchmark>=0.3.0",
     "optuna",
     "optax>=0.0.8,<=0.1.4",
     "packaging>=20.0",
@@ -157,7 +157,7 @@ _deps = [
     "rhoknp>=1.1.0,<1.3.1",
     "rjieba",
     "rouge-score!=0.0.7,!=0.0.8,!=0.1,!=0.1.1",
-    "ruff==0.4.4",
+    "ruff==0.5.1",
     "sacrebleu>=1.4.12,<2.0.0",
     "sacremoses",
     "safetensors>=0.4.1",

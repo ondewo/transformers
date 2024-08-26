@@ -27,6 +27,7 @@ from transformers.testing_utils import (
     require_flash_attn,
     require_read_token,
     require_torch,
+    require_torch_accelerator,
     require_torch_gpu,
     require_torch_sdpa,
     slow,
@@ -51,7 +52,15 @@ if is_torch_available():
 
 
 @require_torch
+@require_torch
 class GemmaModelTester:
+    config_class = GemmaConfig
+    if is_torch_available():
+        model_class = GemmaModel
+        for_causal_lm_class = GemmaForCausalLM
+        for_sequence_class = GemmaForSequenceClassification
+        for_token_class = GemmaForTokenClassification
+
     config_class = GemmaConfig
     if is_torch_available():
         model_class = GemmaModel
@@ -138,6 +147,7 @@ class GemmaModelTester:
 
     def get_config(self):
         return self.config_class(
+        return self.config_class(
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
             num_hidden_layers=self.num_hidden_layers,
@@ -159,6 +169,7 @@ class GemmaModelTester:
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
     ):
         model = self.model_class(config=config)
+        model = self.model_class(config=config)
         model.to(torch_device)
         model.eval()
         result = model(input_ids, attention_mask=input_mask)
@@ -178,6 +189,7 @@ class GemmaModelTester:
         encoder_attention_mask,
     ):
         config.add_cross_attention = True
+        model = self.model_class(config)
         model = self.model_class(config)
         model.to(torch_device)
         model.eval()
@@ -208,6 +220,7 @@ class GemmaModelTester:
         encoder_attention_mask,
     ):
         model = self.for_causal_lm_class(config=config)
+        model = self.for_causal_lm_class(config=config)
         model.to(torch_device)
         model.eval()
         result = model(input_ids, attention_mask=input_mask, labels=token_labels)
@@ -227,6 +240,7 @@ class GemmaModelTester:
     ):
         config.is_decoder = True
         config.add_cross_attention = True
+        model = self.for_causal_lm_class(config=config)
         model = self.for_causal_lm_class(config=config)
         model.to(torch_device)
         model.eval()
@@ -351,6 +365,7 @@ class GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
         attention_mask = input_ids.ne(1).to(torch_device)
         sequence_labels = ids_tensor([self.model_tester.batch_size], self.model_tester.type_sequence_label_size)
         model = self.model_tester.for_sequence_class(config)
+        model = self.model_tester.for_sequence_class(config)
         model.to(torch_device)
         model.eval()
         result = model(input_ids, attention_mask=attention_mask, labels=sequence_labels)
@@ -363,6 +378,7 @@ class GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
         input_ids = input_dict["input_ids"]
         attention_mask = input_ids.ne(1).to(torch_device)
         sequence_labels = ids_tensor([self.model_tester.batch_size], self.model_tester.type_sequence_label_size)
+        model = self.model_tester.for_sequence_class(config)
         model = self.model_tester.for_sequence_class(config)
         model.to(torch_device)
         model.eval()
@@ -379,6 +395,7 @@ class GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
             [self.model_tester.batch_size, config.num_labels], self.model_tester.type_sequence_label_size
         ).to(torch.float)
         model = self.model_tester.for_sequence_class(config)
+        model = self.model_tester.for_sequence_class(config)
         model.to(torch_device)
         model.eval()
         result = model(input_ids, attention_mask=attention_mask, labels=sequence_labels)
@@ -390,6 +407,7 @@ class GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
         input_ids = input_dict["input_ids"]
         attention_mask = input_ids.ne(1).to(torch_device)
         token_labels = ids_tensor([self.model_tester.batch_size, self.model_tester.seq_length], config.num_labels)
+        model = self.model_tester.for_token_class(config=config)
         model = self.model_tester.for_token_class(config=config)
         model.to(torch_device)
         model.eval()
@@ -460,7 +478,7 @@ class GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
         self.skipTest(reason="Gemma flash attention does not support right padding")
 
     @require_torch_sdpa
-    @require_torch_gpu
+    @require_torch_accelerator
     @slow
     def test_sdpa_equivalence(self):
         for model_class in self.all_model_classes:
@@ -566,24 +584,10 @@ class GemmaIntegrationTest(unittest.TestCase):
     def test_model_2b_bf16(self):
         model_id = "google/gemma-2b"
 
-        # Key 9 for MI300, Key 8 for A100/A10, and Key 7 for T4.
-        #
-        # Note: Key 9 is currently set for MI300, but may need potential future adjustments for H100s,
-        # considering differences in hardware processing and potential deviations in generated text.
-        EXPECTED_TEXTS = {
-            7: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music",
-                "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Khichdi",
-            ],
-            8: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music",
-                "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Kaju Kat",
-            ],
-            9: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music",
-                "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Kaju Kat",
-            ],
-        }
+        EXPECTED_TEXTS = [
+            "Hello I am doing a project on the 1990s and I need to know what the most popular music",
+            "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Khichdi",
+        ]
 
         model = AutoModelForCausalLM.from_pretrained(model_id, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16).to(
             torch_device
@@ -595,30 +599,16 @@ class GemmaIntegrationTest(unittest.TestCase):
         output = model.generate(**inputs, max_new_tokens=20, do_sample=False)
         output_text = tokenizer.batch_decode(output, skip_special_tokens=True)
 
-        self.assertEqual(output_text, EXPECTED_TEXTS[self.cuda_compute_capability_major_version])
+        self.assertEqual(output_text, EXPECTED_TEXTS)
 
     @require_read_token
     def test_model_2b_eager(self):
         model_id = "google/gemma-2b"
 
-        # Key 9 for MI300, Key 8 for A100/A10, and Key 7 for T4.
-        #
-        # Note: Key 9 is currently set for MI300, but may need potential future adjustments for H100s,
-        # considering differences in hardware processing and potential deviations in generated text.
-        EXPECTED_TEXTS = {
-            7: [
-                "Hello I am doing a project on the 1990s and I am looking for some information on the ",
-                "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Kaju Kat",
-            ],
-            8: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music",
-                "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Kaju Kat",
-            ],
-            9: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music",
-                "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Kaju Kat",
-            ],
-        }
+        EXPECTED_TEXTS = [
+            "Hello I am doing a project on the 1990s and I need to know what the most popular music",
+            "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Khichdi",
+        ]
 
         model = AutoModelForCausalLM.from_pretrained(
             model_id, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16, attn_implementation="eager"
@@ -631,31 +621,17 @@ class GemmaIntegrationTest(unittest.TestCase):
         output = model.generate(**inputs, max_new_tokens=20, do_sample=False)
         output_text = tokenizer.batch_decode(output, skip_special_tokens=True)
 
-        self.assertEqual(output_text, EXPECTED_TEXTS[self.cuda_compute_capability_major_version])
+        self.assertEqual(output_text, EXPECTED_TEXTS)
 
     @require_torch_sdpa
     @require_read_token
     def test_model_2b_sdpa(self):
         model_id = "google/gemma-2b"
 
-        # Key 9 for MI300, Key 8 for A100/A10, and Key 7 for T4.
-        #
-        # Note: Key 9 is currently set for MI300, but may need potential future adjustments for H100s,
-        # considering differences in hardware processing and potential deviations in generated text.
-        EXPECTED_TEXTS = {
-            7: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music",
-                "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Khichdi",
-            ],
-            8: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music",
-                "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Kaju Kat",
-            ],
-            9: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music",
-                "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Kaju Kat",
-            ],
-        }
+        EXPECTED_TEXTS = [
+            "Hello I am doing a project on the 1990s and I need to know what the most popular music",
+            "Hi today I am going to share with you a very easy and simple recipe of <strong><em>Khichdi",
+        ]
 
         model = AutoModelForCausalLM.from_pretrained(
             model_id, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
@@ -668,11 +644,11 @@ class GemmaIntegrationTest(unittest.TestCase):
         output = model.generate(**inputs, max_new_tokens=20, do_sample=False)
         output_text = tokenizer.batch_decode(output, skip_special_tokens=True)
 
-        self.assertEqual(output_text, EXPECTED_TEXTS[self.cuda_compute_capability_major_version])
+        self.assertEqual(output_text, EXPECTED_TEXTS)
 
-    @pytest.mark.flash_attn_test
     @require_flash_attn
     @require_read_token
+    @pytest.mark.flash_attn_test
     def test_model_2b_flash_attn(self):
         model_id = "google/gemma-2b"
         EXPECTED_TEXTS = [
@@ -733,6 +709,9 @@ class GemmaIntegrationTest(unittest.TestCase):
 
     @require_read_token
     def test_model_7b_fp16(self):
+        if self.cuda_compute_capability_major_version == 7:
+            self.skipTest("This test is failing (`torch.compile` fails) on Nvidia T4 GPU (OOM).")
+
         model_id = "google/gemma-7b"
         EXPECTED_TEXTS = [
             """Hello I am doing a project on a 1999 4.0L 4x4. I""",
@@ -753,6 +732,9 @@ class GemmaIntegrationTest(unittest.TestCase):
 
     @require_read_token
     def test_model_7b_bf16(self):
+        if self.cuda_compute_capability_major_version == 7:
+            self.skipTest("This test is failing (`torch.compile` fails) on Nvidia T4 GPU (OOM).")
+
         model_id = "google/gemma-7b"
 
         # Key 9 for MI300, Key 8 for A100/A10, and Key 7 for T4.
@@ -788,6 +770,9 @@ class GemmaIntegrationTest(unittest.TestCase):
 
     @require_read_token
     def test_model_7b_fp16_static_cache(self):
+        if self.cuda_compute_capability_major_version == 7:
+            self.skipTest("This test is failing (`torch.compile` fails) on Nvidia T4 GPU (OOM).")
+
         model_id = "google/gemma-7b"
         EXPECTED_TEXTS = [
             """Hello I am doing a project on a 1999 4.0L 4x4. I""",
@@ -812,16 +797,10 @@ class GemmaIntegrationTest(unittest.TestCase):
     @require_read_token
     def test_model_7b_4bit(self):
         model_id = "google/gemma-7b"
-        EXPECTED_TEXTS = {
-            7: [
-                "Hello I am doing a project for my school and I am trying to make a program that will take a number and then",
-                """Hi today I am going to talk about the new update for the game called "The new update" and I""",
-            ],
-            8: [
-                "Hello I am doing a project for my school and I am trying to make a program that will take a number and then",
-                "Hi today I am going to talk about the best way to get rid of acne. miniaturing is a very",
-            ],
-        }
+        EXPECTED_TEXTS = [
+            "Hello I am doing a project for my school and I am trying to make a program that will take a number and then",
+            "Hi today I am going to talk about the best way to get rid of acne. miniaturing is a very",
+        ]
 
         model = AutoModelForCausalLM.from_pretrained(model_id, low_cpu_mem_usage=True, load_in_4bit=True)
 
@@ -830,8 +809,7 @@ class GemmaIntegrationTest(unittest.TestCase):
 
         output = model.generate(**inputs, max_new_tokens=20, do_sample=False)
         output_text = tokenizer.batch_decode(output, skip_special_tokens=True)
-
-        self.assertEqual(output_text, EXPECTED_TEXTS[self.cuda_compute_capability_major_version])
+        self.assertEqual(output_text, EXPECTED_TEXTS)
 
     @slow
     @require_torch_gpu
@@ -843,29 +821,13 @@ class GemmaIntegrationTest(unittest.TestCase):
             self.skipTest(reason="This test requires torch >= 2.3 to run.")
 
         NUM_TOKENS_TO_GENERATE = 40
-        # Note on `EXPECTED_TEXT_COMPLETION`'s diff: the current value matches the original test if the original test
-        # was changed to have a cache of 53 tokens (as opposed to 4096), on Ampere GPUs.
-        #
-        # Key 9 for MI300, Key 8 for A100/A10, and Key 7 for T4.
-        #
-        # Note: Key 9 is currently set for MI300, but may need potential future adjustments for H100s,
-        # considering differences in hardware processing and potential deviations in generated text.
-        EXPECTED_TEXT_COMPLETION = {
-            8: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music was in the 1990s. I have looked on the internet and I have found",
-                "Hi today\nI have a problem with my 2007 1.9 tdi 105bhp.\nI have a problem with the engine management light on.\nI have checked the",
-            ],
-            7: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music was in the 1990s. I have looked on the internet and I have found",
-                "Hi today\nI have a problem with my 2007 1.9 tdi 105bhp.\nI have a problem with the engine management light on.\nI have checked the",
-            ],
-            9: [
-                "Hello I am doing a project on the 1990s and I need to know what the most popular music was in the 1990s. I have looked on the internet and I have found",
-                "Hi today\nI have a problem with my 2007 1.9 tdi 105bhp.\nI have a problem with the engine management light on.\nI have checked the",
-            ],
-        }
+        EXPECTED_TEXT_COMPLETION = [
+            "Hello I am doing a project on the 1990s and I need to know what the most popular music was in the 1990s. I have looked on the internet and I have found",
+            "Hi today\nI have a problem with my 2007 1.9 tdi 105bhp.\nI have a problem with the engine management light on.\nI have checked the",
+        ]
 
         prompts = ["Hello I am doing", "Hi today"]
+        tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b", pad_token="</s>", padding_side="right")
         tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b", pad_token="</s>", padding_side="right")
         model = GemmaForCausalLM.from_pretrained("google/gemma-2b", device_map="sequential", torch_dtype=torch.float16)
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
@@ -873,14 +835,14 @@ class GemmaIntegrationTest(unittest.TestCase):
         # Dynamic Cache
         generated_ids = model.generate(**inputs, max_new_tokens=NUM_TOKENS_TO_GENERATE, do_sample=False)
         dynamic_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        self.assertEqual(EXPECTED_TEXT_COMPLETION[8], dynamic_text)  # Both GPU architectures have the same output
+        self.assertEqual(EXPECTED_TEXT_COMPLETION, dynamic_text)  # Both GPU architectures have the same output
 
         # Static Cache
         generated_ids = model.generate(
             **inputs, max_new_tokens=NUM_TOKENS_TO_GENERATE, do_sample=False, cache_implementation="static"
         )
         static_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        self.assertEqual(EXPECTED_TEXT_COMPLETION[self.cuda_compute_capability_major_version], static_text)
+        self.assertEqual(EXPECTED_TEXT_COMPLETION, static_text)
 
         # Static Cache + compile
         model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=True)
@@ -888,4 +850,25 @@ class GemmaIntegrationTest(unittest.TestCase):
             **inputs, max_new_tokens=NUM_TOKENS_TO_GENERATE, do_sample=False, cache_implementation="static"
         )
         static_compiled_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        self.assertEqual(EXPECTED_TEXT_COMPLETION[self.cuda_compute_capability_major_version], static_compiled_text)
+        self.assertEqual(EXPECTED_TEXT_COMPLETION, static_compiled_text)
+
+    def test_model_2b_bf16_dola(self):
+        model_id = "google/gemma-2b"
+        # ground truth text generated with dola_layers="low", repetition_penalty=1.2
+        EXPECTED_TEXTS = [
+            "Hello I am doing an experiment and need to get the mass of a block. The problem is, it has no scale",
+            "Hi today we have the review for a <strong>2016/2017</strong> season of",
+        ]
+
+        model = AutoModelForCausalLM.from_pretrained(model_id, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16).to(
+            torch_device
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        inputs = tokenizer(self.input_text, return_tensors="pt", padding=True).to(torch_device)
+
+        output = model.generate(
+            **inputs, max_new_tokens=20, do_sample=False, dola_layers="low", repetition_penalty=1.2
+        )
+        output_text = tokenizer.batch_decode(output, skip_special_tokens=True)
+        self.assertEqual(output_text, EXPECTED_TEXTS)
