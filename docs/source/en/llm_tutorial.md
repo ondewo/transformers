@@ -247,11 +247,10 @@ While the autoregressive generation process is relatively straightforward, makin
 
 ### Advanced generate usage
 
-1. Guide on how to [control different generation methods](generation_strategies), how to set up the generation configuration file, and how to stream the output;
-2. [Accelerating text generation](llm_optims);
-3. [Prompt templates for chat LLMs](chat_templating);
-4. [Prompt design guide](tasks/prompting);
-5. API reference on [`~generation.GenerationConfig`], [`~generation.GenerationMixin.generate`], and [generate-related classes](internal/generation_utils). Most of the classes, including the logits processors, have usage examples!
+1. [Guide](generation_strategies) on how to control different generation methods, how to set up the generation configuration file, and how to stream the output;
+2. [Guide](chat_templating) on the prompt template for chat LLMs;
+3. [Guide](tasks/prompting) on to get the most of prompt design;
+4. API reference on [`~generation.GenerationConfig`], [`~generation.GenerationMixin.generate`], and [generate-related classes](internal/generation_utils). Most of the classes, including the logits processors, have usage examples!
 
 ### LLM leaderboards
 
@@ -260,8 +259,8 @@ While the autoregressive generation process is relatively straightforward, makin
 
 ### Latency, throughput and memory utilization
 
-1. Guide on how to [optimize LLMs for speed and memory](llm_tutorial_optimization);
-2. Guide on [quantization](main_classes/quantization) such as bitsandbytes and autogptq, which shows you how to drastically reduce your memory requirements.
+1. [Guide](llm_tutorial_optimization) on how to optimize LLMs for speed and memory;
+2. [Guide](main_classes/quantization) on quantization such as bitsandbytes and autogptq, which shows you how to drastically reduce your memory requirements.
 
 ### Related libraries
 

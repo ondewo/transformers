@@ -14,7 +14,8 @@
 # limitations under the License.
 
 import copy
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+import warnings
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -25,7 +26,7 @@ from .logits_process import LogitsProcessorList, MinLengthLogitsProcessor
 
 if TYPE_CHECKING:
     from ..modeling_utils import PreTrainedModel
-    from .configuration_utils import GenerationConfig
+    from .logits_process import LogitsProcessorList
 
 
 class CandidateGenerator:
@@ -69,17 +70,14 @@ class CandidateGenerator:
 
 class AssistedCandidateGenerator(CandidateGenerator):
     """
-    `CandidateGenerator` class to be used for assisted generation and speculative decoding. This class generates
-    candidates through the use of a smaller model. Read the following blog post for more information:
-    https://huggingface.co/blog/assisted-generation
+    `CandidateGenerator` class to be used for assisted generation. This class generates candidates through the use of
+    a smaller model. Read the following blog post for more information: https://huggingface.co/blog/assisted-generation
 
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
             Indices of input sequence tokens in the vocabulary. [What are input IDs?](../glossary#input-ids)
         assistant_model (`PreTrainedModel`):
             The model to be used for generating candidates. This model should be smaller than the main model.
-        generation_config (`~generation.GenerationConfig`, *optional*):
-            The generation configuration to be used as base parametrization for the generation call.
         logits_processor (`LogitsProcessorList`):
             An instance of [`LogitsProcessorList`]. List of instances of class derived from [`LogitsProcessor`]
             used to modify the prediction scores of the language modeling head applied at each generation step.
@@ -88,29 +86,31 @@ class AssistedCandidateGenerator(CandidateGenerator):
             model as well.
         inputs_tensor (`torch.Tensor`, *optional*):
             The model input tensor. In encoder-decoder models, this is the encoder input.
+        eos_token_id (`Union[int, List[int]]`, *optional*):
+            The id of the *end-of-sequence* token. Optionally, use a list to set multiple *end-of-sequence* tokens.
     """
 
     def __init__(
         self,
         input_ids: torch.LongTensor,
         assistant_model: "PreTrainedModel",
-        generation_config: "GenerationConfig",
+        logits_processor: "LogitsProcessorList",
         model_kwargs: Dict,
         inputs_tensor: Optional[torch.Tensor] = None,
-        logits_processor: "LogitsProcessorList" = None,
+        eos_token_id: Optional[Union[int, List[int]]] = None,
     ):
-        # Make sure all data at the same device as assistant model
-        device = assistant_model.device
-        input_ids = input_ids.to(device)
-        if inputs_tensor is not None:
-            inputs_tensor = inputs_tensor.to(device)
-
-        # Prepare the assistant and the starting number of candidate tokens
         self.assistant_model = assistant_model
-        self.num_assistant_tokens = assistant_model.generation_config.num_assistant_tokens
 
-        # Set eos in assistant same as in target model
-        self.assistant_model.generation_config.eos_token_id = generation_config.eos_token_id
+        # Prepare the number of candidate tokens
+        if hasattr(assistant_model, "num_assistant_tokens"):
+            warnings.warn(
+                "Setting `num_assistant_tokens` via `assistant_model.num_assistant_tokens` is deprecated and will be "
+                "removed in v4.37. Make sure to set `num_assistant_tokens` via the generation_config instead.",
+                FutureWarning,
+            )
+            self.num_assistant_tokens = assistant_model.num_assistant_tokens
+        else:
+            self.num_assistant_tokens = assistant_model.generation_config.num_assistant_tokens
 
         # Prepare the kwargs for the assistant model
         assistant_kwargs = {}
@@ -131,7 +131,7 @@ class AssistedCandidateGenerator(CandidateGenerator):
                 inputs_tensor, assistant_model.generation_config.bos_token_id, assistant_kwargs
             )
             assistant_kwargs = assistant_model._prepare_encoder_decoder_kwargs_for_generation(
-                inputs_tensor, assistant_kwargs, model_input_name, assistant_model.generation_config
+                inputs_tensor, assistant_kwargs, model_input_name
             )
         elif "encoder_outputs" in model_kwargs:
             assistant_kwargs["encoder_outputs"] = model_kwargs["encoder_outputs"]
@@ -141,9 +141,11 @@ class AssistedCandidateGenerator(CandidateGenerator):
         if assistant_model.config.is_encoder_decoder:
             # both are encoder-decoder
             self.input_ids_key = "decoder_input_ids"
+            self.attention_key = "decoder_attention_mask"
         elif "encoder_outputs" in assistant_kwargs:
             # special case for encoder-decoder with decoder-only assistant (like DistilWhisper)
             self.input_ids_key = "input_ids"
+            self.attention_key = "attention_mask"
             self.assistant_kwargs["attention_mask"] = self.assistant_kwargs.get(
                 "decoder_attention_mask",
                 torch.ones((input_ids.shape[0], 1), device=input_ids.device, dtype=torch.long),
@@ -151,33 +153,15 @@ class AssistedCandidateGenerator(CandidateGenerator):
         else:
             # both are decoder-only
             self.input_ids_key = "input_ids"
+            self.attention_key = "attention_mask"
 
-        # Prepare generation-related options.
-        self.logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
-        self.generation_config = copy.deepcopy(generation_config)
-        self.generation_config.return_dict_in_generate = True
-        self.generation_config.output_scores = True
-
-        # Disable sampling -- this implementation of assisted generation/speculative decoding uses the assistant
-        # greedily to maximize matches. Disables sampling-related flags to prevent warnings
-        self.generation_config.do_sample = False
-        for attr in ("temperature", "top_p", "min_p", "typical_p", "top_k", "epsilon_cutoff", "eta_cutoff"):
-            setattr(self.generation_config, attr, None)
-
-        # avoid unnecessary warnings that min_length is larger than max_new_tokens
-        # remove the `MinLengthLogitsProcessor` if exists (NOTE: no need to check for `MinNewTokensLogitsProcessor`)
-        self.main_model_min_length = self.generation_config.min_length
-        self.generation_config.min_length = 0
-        self.generation_config.min_new_tokens = None
-        for processor in self.logits_processor:
-            if isinstance(processor, MinLengthLogitsProcessor):
-                raise ValueError(
-                    "Passing `MinLengthLogitsProcessor` when using `assisted_generation is disabled. "
-                    "Please pass in `min_length` into `.generate()` instead"
-                )
-
-        # We need to roll back the cache in assisted generation, only DynamicCache is supported
-        self.generation_config.cache_implementation = None
+        # Prepare other attributes
+        if isinstance(eos_token_id, int):
+            eos_token_id = [eos_token_id]
+        self.eos_token_id_tensor = (
+            torch.tensor(eos_token_id).to(input_ids.device) if eos_token_id is not None else None
+        )
+        self.logits_processor = logits_processor
 
     def get_candidates(self, input_ids: torch.LongTensor) -> Tuple[torch.LongTensor, Optional[torch.FloatTensor]]:
         """
@@ -192,19 +176,12 @@ class AssistedCandidateGenerator(CandidateGenerator):
             assessed by the model and a `torch.FloatTensor` of shape `(batch_size, candidate_length,
             vocabulary_size)` containing the logits associated to each candidate.
         """
-        input_ids = input_ids.to(self.assistant_model.device)
-
-        # Don't generate more than `max_length - 1` candidates since the target model generates one extra token.
-        new_cur_len = input_ids.shape[-1]
-        max_new_tokens = min(int(self.num_assistant_tokens), self.generation_config.max_length - new_cur_len - 1)
-        min_new_tokens = max(min(max_new_tokens, self.main_model_min_length - new_cur_len), 0)
-        if max_new_tokens == 0:
-            return input_ids, None
-
         # 1. If it is not the first round of candidate generation, prepare the inputs based on the input_ids length
         # (which implicitly contains the number of accepted candidates from the previous round)
         has_past_key_values = self.assistant_kwargs.get("past_key_values", None) is not None
         if has_past_key_values:
+            new_cur_len = input_ids.shape[-1]
+
             new_cache_size = new_cur_len - 1
             self.assistant_kwargs["past_key_values"] = _crop_past_key_values(
                 self.assistant_model, self.assistant_kwargs["past_key_values"], new_cache_size - 1
@@ -218,12 +195,12 @@ class AssistedCandidateGenerator(CandidateGenerator):
         # 2. Forecast next N tokens using the assistant model.
         assistant_generation_kwargs = {
             self.input_ids_key: input_ids,
-            "min_new_tokens": min_new_tokens,
-            "max_new_tokens": max_new_tokens,
-            "generation_config": self.generation_config,
-            "logits_processor": self.logits_processor,
+            "do_sample": False,
+            "num_beams": 1,
+            "max_new_tokens": int(self.num_assistant_tokens),
+            "return_dict_in_generate": True,
+            "output_scores": True,
         }
-
         assistant_output = self.assistant_model.generate(**assistant_generation_kwargs, **self.assistant_kwargs)
 
         # 3. Update variables for the next round of candidate generation
@@ -250,10 +227,7 @@ class AssistedCandidateGenerator(CandidateGenerator):
         # Adjust the max number of assistant tokens to use in the next iteration. This is a simple heuristic,
         # probably can be improved -- we want to balance the benefits of getting assistant tokens correct with the
         # cost of forecasting incorrect assistant tokens.
-        if self.assistant_model.generation_config.num_assistant_tokens_schedule in {
-            "heuristic",
-            "heuristic_transient",
-        }:
+        if self.assistant_model.generation_config.num_assistant_tokens_schedule == "heuristic":
             if num_matches == int(self.num_assistant_tokens):
                 self.num_assistant_tokens += 2.0
             else:
@@ -379,31 +353,41 @@ def _crop_past_key_values(model, past_key_values, max_length):
         for idx in range(len(past_key_values)):
             new_past.append(
                 (
-                    past_key_values[idx][0][:, :, :max_length, :],
-                    past_key_values[idx][1][:, :, :max_length, :],
+                    past_key_values[idx][0][:, :, :maximum_length, :],
+                    past_key_values[idx][1][:, :, :maximum_length, :],
                     past_key_values[idx][2],
                     past_key_values[idx][3],
                 )
             )
         past_key_values = tuple(new_past)
-    # gptbigcode is special and stores kv in shape (batch_size, seq_len, dim), if it's a multi_query model
+    # bloom is special
+    elif "bloom" in model.__class__.__name__.lower() or (
+        model.config.architectures is not None and "bloom" in model.config.architectures[0].lower()
+    ):
+        for idx in range(len(past_key_values)):
+            new_past.append(
+                (
+                    past_key_values[idx][0][:, :, :maximum_length],
+                    past_key_values[idx][1][:, :maximum_length, :],
+                )
+            )
+        past_key_values = tuple(new_past)
+    # gptbigcode is too
     elif "gptbigcode" in model.__class__.__name__.lower() or (
         model.config.architectures is not None and "gptbigcode" in model.config.architectures[0].lower()
     ):
         if model.config.multi_query:
             for idx in range(len(past_key_values)):
-                past_key_values[idx] = past_key_values[idx][:, :max_length, :]
+                past_key_values[idx] = past_key_values[idx][:, :maximum_length, :]
         else:
             for idx in range(len(past_key_values)):
-                past_key_values[idx] = past_key_values[idx][:, :, :max_length, :]
-    elif isinstance(past_key_values, DynamicCache):
-        past_key_values.crop(max_length)
-    elif past_key_values is not None:
+                past_key_values[idx] = past_key_values[idx][:, :, :maximum_length, :]
+    else:
         for idx in range(len(past_key_values)):
             new_past.append(
                 (
-                    past_key_values[idx][0][:, :, :max_length, :],
-                    past_key_values[idx][1][:, :, :max_length, :],
+                    past_key_values[idx][0][:, :, :maximum_length, :],
+                    past_key_values[idx][1][:, :, :maximum_length, :],
                 )
             )
         past_key_values = tuple(new_past)

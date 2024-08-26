@@ -1,11 +1,9 @@
 import time
 import warnings
 from abc import ABC
-from collections import OrderedDict
 from copy import deepcopy
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Optional
 
-import numpy as np
 import torch
 from torch.nn import functional as F
 
@@ -15,9 +13,6 @@ from ..utils import add_start_docstrings, logging
 
 
 logger = logging.get_logger(__name__)
-# We maintain a module-level cache of the embedding vectors for the stop string criterion
-# because they are slow to compute
-STOP_STRING_EMBEDDING_CACHE = OrderedDict()
 
 
 STOPPING_CRITERIA_INPUTS_DOCSTRING = r"""
@@ -37,8 +32,7 @@ STOPPING_CRITERIA_INPUTS_DOCSTRING = r"""
             Additional stopping criteria specific kwargs.
 
     Return:
-        `torch.BoolTensor`. (`torch.BoolTensor` of shape `(batch_size, 1)`), where `True` indicates we stop generation
-            for a particular row, `True` indicates we should continue.
+        `bool`. `False` indicates we should continue, `True` indicates we should stop.
 
 """
 
@@ -51,7 +45,7 @@ class StoppingCriteria(ABC):
     """
 
     @add_start_docstrings(STOPPING_CRITERIA_INPUTS_DOCSTRING)
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
         raise NotImplementedError("StoppingCriteria needs to be subclassed")
 
 
@@ -72,7 +66,7 @@ class MaxLengthCriteria(StoppingCriteria):
         self.max_position_embeddings = max_position_embeddings
 
     @add_start_docstrings(STOPPING_CRITERIA_INPUTS_DOCSTRING)
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
         cur_len = input_ids.shape[-1]
         is_done = cur_len >= self.max_length
         if self.max_position_embeddings is not None and not is_done and cur_len >= self.max_position_embeddings:
@@ -81,7 +75,7 @@ class MaxLengthCriteria(StoppingCriteria):
                 f"maximum length ({self.max_position_embeddings}). Depending on the model, you may observe "
                 "exceptions, performance degradation, or nothing at all."
             )
-        return torch.full((input_ids.shape[0],), is_done, device=input_ids.device, dtype=torch.bool)
+        return is_done
 
 
 class MaxTimeCriteria(StoppingCriteria):
@@ -462,11 +456,8 @@ class EosTokenCriteria(StoppingCriteria):
 
 class StoppingCriteriaList(list):
     @add_start_docstrings(STOPPING_CRITERIA_INPUTS_DOCSTRING)
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
-        is_done = torch.full((input_ids.shape[0],), False, device=input_ids.device, dtype=torch.bool)
-        for criteria in self:
-            is_done = is_done | criteria(input_ids, scores, **kwargs)
-        return is_done
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
+        return any(criteria(input_ids, scores) for criteria in self)
 
     @property
     def max_length(self) -> Optional[int]:

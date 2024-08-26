@@ -13,46 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Processing saving/loading class for common processors.
+ Processing saving/loading class for common processors.
 """
 
-import copy
-import inspect
-import json
 import os
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TypedDict, Union
-
-import numpy as np
+from typing import Optional, Union
 
 from .dynamic_module_utils import custom_object_save
-from .image_utils import ChannelDimension, is_vision_available
-
-
-if is_vision_available():
-    from .image_utils import PILImageResampling
-
-from .tokenization_utils_base import (
-    PaddingStrategy,
-    PreTrainedTokenizerBase,
-    TruncationStrategy,
-)
-from .utils import (
-    CHAT_TEMPLATE_NAME,
-    PROCESSOR_NAME,
-    PushToHubMixin,
-    TensorType,
-    add_model_info_to_auto_map,
-    add_model_info_to_custom_pipelines,
-    cached_file,
-    copy_func,
-    direct_transformers_import,
-    download_url,
-    is_offline_mode,
-    is_remote_url,
-    logging,
-)
+from .tokenization_utils_base import PreTrainedTokenizerBase
+from .utils import PushToHubMixin, copy_func, direct_transformers_import, logging
 
 
 logger = logging.get_logger(__name__)
@@ -68,267 +39,19 @@ AUTO_TO_BASE_CLASS_MAPPING = {
 }
 
 
-class TextKwargs(TypedDict, total=False):
-    """
-    Keyword arguments for text processing. For extended documentation, check out tokenization_utils_base methods and
-    docstrings associated.
-
-    Attributes:
-        add_special_tokens (`bool`, *optional*)
-            Whether or not to add special tokens when encoding the sequences.
-        padding (`bool`, `str` or [`~utils.PaddingStrategy`], *optional*)
-            Activates and controls padding.
-        truncation (`bool`, `str` or [`~tokenization_utils_base.TruncationStrategy`], *optional*):
-            Activates and controls truncation.
-        max_length (`int`, *optional*):
-            Controls the maximum length to use by one of the truncation/padding parameters.
-        stride (`int`, *optional*):
-            If set, the overflowing tokens will contain some tokens from the end of the truncated sequence.
-        is_split_into_words (`bool`, *optional*):
-            Whether or not the input is already pre-tokenized.
-        pad_to_multiple_of (`int`, *optional*):
-            If set, will pad the sequence to a multiple of the provided value.
-        return_token_type_ids (`bool`, *optional*):
-            Whether to return token type IDs.
-        return_attention_mask (`bool`, *optional*):
-            Whether to return the attention mask.
-        return_overflowing_tokens (`bool`, *optional*):
-            Whether or not to return overflowing token sequences.
-        return_special_tokens_mask (`bool`, *optional*):
-            Whether or not to return special tokens mask information.
-        return_offsets_mapping (`bool`, *optional*):
-            Whether or not to return `(char_start, char_end)` for each token.
-        return_length (`bool`, *optional*):
-            Whether or not to return the lengths of the encoded inputs.
-        verbose (`bool`, *optional*):
-            Whether or not to print more information and warnings.
-        padding_side (`str`, *optional*):
-            The side on which padding will be applied.
-    """
-
-    add_special_tokens: Optional[bool]
-    padding: Union[bool, str, PaddingStrategy]
-    truncation: Union[bool, str, TruncationStrategy]
-    max_length: Optional[int]
-    stride: Optional[int]
-    is_split_into_words: Optional[bool]
-    pad_to_multiple_of: Optional[int]
-    return_token_type_ids: Optional[bool]
-    return_attention_mask: Optional[bool]
-    return_overflowing_tokens: Optional[bool]
-    return_special_tokens_mask: Optional[bool]
-    return_offsets_mapping: Optional[bool]
-    return_length: Optional[bool]
-    verbose: Optional[bool]
-    padding_side: Optional[str]
-
-
-class ImagesKwargs(TypedDict, total=False):
-    """
-    Keyword arguments for image processing. For extended documentation, check the appropriate ImageProcessor
-    class methods and docstrings.
-
-    Attributes:
-        do_resize (`bool`, *optional*):
-            Whether to resize the image.
-        size (`Dict[str, int]`, *optional*):
-            Resize the shorter side of the input to `size["shortest_edge"]`.
-        size_divisor (`int`, *optional*):
-            The size by which to make sure both the height and width can be divided.
-        crop_size (`Dict[str, int]`, *optional*):
-            Desired output size when applying center-cropping.
-        resample (`PILImageResampling`, *optional*):
-            Resampling filter to use if resizing the image.
-        do_rescale (`bool`, *optional*):
-            Whether to rescale the image by the specified scale `rescale_factor`.
-        rescale_factor (`int` or `float`, *optional*):
-            Scale factor to use if rescaling the image.
-        do_normalize (`bool`, *optional*):
-            Whether to normalize the image.
-        image_mean (`float` or `List[float]`, *optional*):
-            Mean to use if normalizing the image.
-        image_std (`float` or `List[float]`, *optional*):
-            Standard deviation to use if normalizing the image.
-        do_pad (`bool`, *optional*):
-            Whether to pad the image to the `(max_height, max_width)` of the images in the batch.
-        do_center_crop (`bool`, *optional*):
-            Whether to center crop the image.
-        data_format (`ChannelDimension` or `str`, *optional*):
-            The channel dimension format for the output image.
-        input_data_format (`ChannelDimension` or `str`, *optional*):
-            The channel dimension format for the input image.
-    """
-
-    do_resize: Optional[bool]
-    size: Optional[Dict[str, int]]
-    size_divisor: Optional[int]
-    crop_size: Optional[Dict[str, int]]
-    resample: Optional[Union["PILImageResampling", int]]
-    do_rescale: Optional[bool]
-    rescale_factor: Optional[float]
-    do_normalize: Optional[bool]
-    image_mean: Optional[Union[float, List[float]]]
-    image_std: Optional[Union[float, List[float]]]
-    do_pad: Optional[bool]
-    do_center_crop: Optional[bool]
-    data_format: Optional[ChannelDimension]
-    input_data_format: Optional[Union[str, ChannelDimension]]
-
-
-class VideosKwargs(TypedDict, total=False):
-    """
-    Keyword arguments for video processing.
-
-    Attributes:
-        do_resize (`bool`):
-            Whether to resize the image.
-        size (`Dict[str, int]`, *optional*):
-            Resize the shorter side of the input to `size["shortest_edge"]`.
-        size_divisor (`int`, *optional*):
-            The size by which to make sure both the height and width can be divided.
-        resample (`PILImageResampling`, *optional*):
-            Resampling filter to use if resizing the image.
-        do_rescale (`bool`, *optional*):
-            Whether to rescale the image by the specified scale `rescale_factor`.
-        rescale_factor (`int` or `float`, *optional*):
-            Scale factor to use if rescaling the image.
-        do_normalize (`bool`, *optional*):
-            Whether to normalize the image.
-        image_mean (`float` or `List[float]`, *optional*):
-            Mean to use if normalizing the image.
-        image_std (`float` or `List[float]`, *optional*):
-            Standard deviation to use if normalizing the image.
-        do_pad (`bool`, *optional*):
-            Whether to pad the image to the `(max_height, max_width)` of the images in the batch.
-        do_center_crop (`bool`, *optional*):
-            Whether to center crop the image.
-        data_format (`ChannelDimension` or `str`, *optional*):
-            The channel dimension format for the output image.
-        input_data_format (`ChannelDimension` or `str`, *optional*):
-            The channel dimension format for the input image.
-    """
-
-    do_resize: Optional[bool]
-    size: Optional[Dict[str, int]]
-    size_divisor: Optional[int]
-    resample: Optional["PILImageResampling"]
-    do_rescale: Optional[bool]
-    rescale_factor: Optional[float]
-    do_normalize: Optional[bool]
-    image_mean: Optional[Union[float, List[float]]]
-    image_std: Optional[Union[float, List[float]]]
-    do_pad: Optional[bool]
-    do_center_crop: Optional[bool]
-    data_format: Optional[ChannelDimension]
-    input_data_format: Optional[Union[str, ChannelDimension]]
-
-
-class AudioKwargs(TypedDict, total=False):
-    """
-    Keyword arguments for audio processing.
-
-    Attributes:
-        sampling_rate (`int`, *optional*):
-            The sampling rate at which the `raw_speech` input was sampled.
-        raw_speech (`np.ndarray`, `List[float]`, `List[np.ndarray]`, `List[List[float]]`):
-            The sequence or batch of sequences to be padded. Each sequence can be a numpy array, a list of float
-            values, a list of numpy arrays or a list of list of float values. Must be mono channel audio, not
-            stereo, i.e. single float per timestep.
-        padding (`bool`, `str` or [`~utils.PaddingStrategy`], *optional*):
-            Select a strategy to pad the returned sequences (according to the model's padding side and padding
-            index) among:
-
-            - `True` or `'longest'`: Pad to the longest sequence in the batch (or no padding if only a single
-                sequence if provided).
-            - `'max_length'`: Pad to a maximum length specified with the argument `max_length` or to the maximum
-                acceptable input length for the model if that argument is not provided.
-            - `False` or `'do_not_pad'`
-        max_length (`int`, *optional*):
-            Maximum length of the returned list and optionally padding length (see above).
-        truncation (`bool`, *optional*):
-            Activates truncation to cut input sequences longer than *max_length* to *max_length*.
-        pad_to_multiple_of (`int`, *optional*):
-            If set, will pad the sequence to a multiple of the provided value.
-        return_attention_mask (`bool`, *optional*):
-            Whether or not [`~ASTFeatureExtractor.__call__`] should return `attention_mask`.
-    """
-
-    sampling_rate: Optional[int]
-    raw_speech: Optional[Union["np.ndarray", List[float], List["np.ndarray"], List[List[float]]]]
-    padding: Optional[Union[bool, str, PaddingStrategy]]
-    max_length: Optional[int]
-    truncation: Optional[bool]
-    pad_to_multiple_of: Optional[int]
-    return_attention_mask: Optional[bool]
-
-
-class CommonKwargs(TypedDict, total=False):
-    return_tensors: Optional[Union[str, TensorType]]
-
-
-class ProcessingKwargs(TextKwargs, ImagesKwargs, VideosKwargs, AudioKwargs, CommonKwargs, total=False):
-    """
-    Base class for kwargs passing to processors.
-    A model should have its own `ModelProcessorKwargs` class that inherits from `ProcessingKwargs` to provide:
-        1) Additional typed keys and that this model requires to process inputs.
-        2) Default values for existing keys under a `_defaults` attribute.
-    New keys have to be defined as follows to ensure type hinting is done correctly.
-
-    ```python
-    # adding a new image kwarg for this model
-    class ModelImagesKwargs(ImagesKwargs, total=False):
-        new_image_kwarg: Optional[bool]
-
-    class ModelProcessorKwargs(ProcessingKwargs, total=False):
-        images_kwargs: ModelImagesKwargs
-        _defaults = {
-            "images_kwargs: {
-                "new_image_kwarg": False,
-            }
-            "text_kwargs": {
-                "padding": "max_length",
-            },
-        }
-
-    ```
-    """
-
-    common_kwargs: CommonKwargs = {
-        **CommonKwargs.__annotations__,
-    }
-    text_kwargs: TextKwargs = {
-        **TextKwargs.__annotations__,
-    }
-    images_kwargs: ImagesKwargs = {
-        **ImagesKwargs.__annotations__,
-    }
-    videos_kwargs: VideosKwargs = {
-        **VideosKwargs.__annotations__,
-    }
-    audio_kwargs: AudioKwargs = {
-        **AudioKwargs.__annotations__,
-    }
-
-
 class ProcessorMixin(PushToHubMixin):
     """
     This is a mixin used to provide saving/loading functionality for all processor classes.
     """
 
     attributes = ["feature_extractor", "tokenizer"]
-    optional_attributes = ["chat_template"]
     # Names need to be attr_class for attr in attributes
     feature_extractor_class = None
     tokenizer_class = None
     _auto_class = None
-    valid_kwargs: List[str] = []
 
     # args have to match the attributes class attribute
     def __init__(self, *args, **kwargs):
-        # First, extract optional attributes from kwargs if present
-        # Optional attributes can never be positional arguments
-        for optional_attribute in self.optional_attributes:
-            setattr(self, optional_attribute, kwargs.pop(optional_attribute, None))
         # Sanitize args and kwargs
         for key in kwargs:
             if key not in self.attributes:
@@ -356,76 +79,16 @@ class ProcessorMixin(PushToHubMixin):
                 proper_class = getattr(transformers_module, class_name)
 
             if not isinstance(arg, proper_class):
-                raise TypeError(
+                raise ValueError(
                     f"Received a {type(arg).__name__} for argument {attribute_name}, but a {class_name} was expected."
                 )
 
             setattr(self, attribute_name, arg)
 
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Serializes this instance to a Python dictionary.
-
-        Returns:
-            `Dict[str, Any]`: Dictionary of all the attributes that make up this processor instance.
-        """
-        output = copy.deepcopy(self.__dict__)
-
-        # Get the kwargs in `__init__`.
-        sig = inspect.signature(self.__init__)
-        # Only save the attributes that are presented in the kwargs of `__init__`.
-        attrs_to_save = sig.parameters
-        # Don't save attributes like `tokenizer`, `image processor` etc.
-        attrs_to_save = [x for x in attrs_to_save if x not in self.__class__.attributes]
-        # extra attributes to be kept
-        attrs_to_save += ["auto_map"]
-
-        output = {k: v for k, v in output.items() if k in attrs_to_save}
-
-        output["processor_class"] = self.__class__.__name__
-
-        if "tokenizer" in output:
-            del output["tokenizer"]
-        if "image_processor" in output:
-            del output["image_processor"]
-        if "feature_extractor" in output:
-            del output["feature_extractor"]
-
-        # Some attributes have different names but containing objects that are not simple strings
-        output = {
-            k: v
-            for k, v in output.items()
-            if not (isinstance(v, PushToHubMixin) or v.__class__.__name__ == "BeamSearchDecoderCTC")
-        }
-
-        return output
-
-    def to_json_string(self) -> str:
-        """
-        Serializes this instance to a JSON string.
-
-        Returns:
-            `str`: String containing all the attributes that make up this feature_extractor instance in JSON format.
-        """
-        dictionary = self.to_dict()
-
-        return json.dumps(dictionary, indent=2, sort_keys=True) + "\n"
-
-    def to_json_file(self, json_file_path: Union[str, os.PathLike]):
-        """
-        Save this instance to a JSON file.
-
-        Args:
-            json_file_path (`str` or `os.PathLike`):
-                Path to the JSON file in which this processor instance's parameters will be saved.
-        """
-        with open(json_file_path, "w", encoding="utf-8") as writer:
-            writer.write(self.to_json_string())
-
     def __repr__(self):
         attributes_repr = [f"- {name}: {repr(getattr(self, name))}" for name in self.attributes]
         attributes_repr = "\n".join(attributes_repr)
-        return f"{self.__class__.__name__}:\n{attributes_repr}\n\n{self.to_json_string()}"
+        return f"{self.__class__.__name__}:\n{attributes_repr}"
 
     def save_pretrained(self, save_directory, push_to_hub: bool = False, **kwargs):
         """
@@ -476,7 +139,6 @@ class ProcessorMixin(PushToHubMixin):
         if self._auto_class is not None:
             attrs = [getattr(self, attribute_name) for attribute_name in self.attributes]
             configs = [(a.init_kwargs if isinstance(a, PreTrainedTokenizerBase) else a) for a in attrs]
-            configs.append(self)
             custom_object_save(self, save_directory, config=configs)
 
         for attribute_name in self.attributes:
@@ -493,25 +155,6 @@ class ProcessorMixin(PushToHubMixin):
                 attribute = getattr(self, attribute_name)
                 if isinstance(attribute, PreTrainedTokenizerBase):
                     del attribute.init_kwargs["auto_map"]
-
-        # If we save using the predefined names, we can load using `from_pretrained`
-        # plus we save chat_template in its own file
-        output_processor_file = os.path.join(save_directory, PROCESSOR_NAME)
-        output_chat_template_file = os.path.join(save_directory, CHAT_TEMPLATE_NAME)
-
-        processor_dict = self.to_dict()
-        chat_template = processor_dict.pop("chat_template", None)
-        if chat_template is not None:
-            chat_template_json_string = json.dumps({"chat_template": chat_template}, indent=2, sort_keys=True) + "\n"
-            with open(output_chat_template_file, "w", encoding="utf-8") as writer:
-                writer.write(chat_template_json_string)
-            logger.info(f"chat template saved in {output_chat_template_file}")
-
-        # For now, let's not save to `processor_config.json` if the processor doesn't have extra attributes and
-        # `auto_map` is not specified.
-        if set(processor_dict.keys()) != {"processor_class"}:
-            self.to_json_file(output_processor_file)
-            logger.info(f"processor saved in {output_processor_file}")
 
         if push_to_hub:
             self._upload_modified_files(
@@ -859,7 +502,8 @@ class ProcessorMixin(PushToHubMixin):
                 This can be either:
 
                 - a string, the *model id* of a pretrained feature_extractor hosted inside a model repo on
-                  huggingface.co.
+                  huggingface.co. Valid model ids can be located at the root-level, like `bert-base-uncased`, or
+                  namespaced under a user or organization name, like `dbmdz/bert-base-german-cased`.
                 - a path to a *directory* containing a feature extractor file saved using the
                   [`~SequenceFeatureExtractor.save_pretrained`] method, e.g., `./my_model_directory/`.
                 - a path or url to a saved feature extractor JSON *file*, e.g.,
@@ -890,9 +534,7 @@ class ProcessorMixin(PushToHubMixin):
             kwargs["token"] = token
 
         args = cls._get_arguments_from_pretrained(pretrained_model_name_or_path, **kwargs)
-        processor_dict, kwargs = cls.get_processor_dict(pretrained_model_name_or_path, **kwargs)
-
-        return cls.from_args_and_dict(args, processor_dict, **kwargs)
+        return cls(*args)
 
     @classmethod
     def register_for_auto_class(cls, auto_class="AutoProcessor"):
@@ -942,55 +584,6 @@ class ProcessorMixin(PushToHubMixin):
     def model_input_names(self):
         first_attribute = getattr(self, self.attributes[0])
         return getattr(first_attribute, "model_input_names", None)
-
-    @staticmethod
-    def validate_init_kwargs(processor_config, valid_kwargs):
-        kwargs_from_config = processor_config.keys()
-        unused_kwargs = {}
-        unused_keys = set(kwargs_from_config) - set(valid_kwargs)
-        if unused_keys:
-            unused_key_str = ", ".join(unused_keys)
-            logger.warning(
-                f"Some kwargs in processor config are unused and will not have any effect: {unused_key_str}. "
-            )
-            unused_kwargs = {k: processor_config[k] for k in unused_keys}
-        return unused_kwargs
-
-    def apply_chat_template(
-        self,
-        conversation: Union[List[Dict[str, str]]],
-        chat_template: Optional[str] = None,
-        tokenize: bool = False,
-        **kwargs,
-    ) -> str:
-        """
-        Similar to the `apply_chat_template` method on tokenizers, this method applies a Jinja template to input
-        conversations to turn them into a single tokenizable string.
-
-        Args:
-            conversation (`List[Dict, str, str]`):
-                The conversation to format.
-            chat_template (`Optional[str]`, *optional*):
-                The Jinja template to use for formatting the conversation. If not provided, the tokenizer's
-                chat template is used.
-            tokenize (`bool`, *optional*, defaults to `False`):
-                Whether to tokenize the output or not.
-            **kwargs:
-                Additional keyword arguments
-        """
-
-        if chat_template is None:
-            if self.chat_template is not None:
-                chat_template = self.chat_template
-            else:
-                raise ValueError(
-                    "No chat template is set for this processor. Please either set the `chat_template` attribute, "
-                    "or provide a chat template as an argument. See "
-                    "https://huggingface.co/docs/transformers/main/en/chat_templating for more information."
-                )
-        return self.tokenizer.apply_chat_template(
-            conversation, chat_template=chat_template, tokenize=tokenize, **kwargs
-        )
 
 
 ProcessorMixin.push_to_hub = copy_func(ProcessorMixin.push_to_hub)

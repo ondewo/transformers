@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Testing suite for the TensorFlow Whisper model."""
+""" Testing suite for the TensorFlow Whisper model. """
 
 from __future__ import annotations
 
@@ -309,7 +309,7 @@ class TFWhisperModelTest(TFModelTesterMixin, PipelineTesterMixin, unittest.TestC
         config = self.model_tester.get_config()
         for model_class in self.all_model_classes:
             model = model_class(config)
-            model.build_in_name_scope()
+            model.build()
 
             embeds = model.get_encoder().embed_positions.get_weights()[0]
             sinusoids = sinusoidal_embedding_init(embeds.shape).numpy()
@@ -792,7 +792,7 @@ def _test_large_generation_multilingual(in_queue, out_queue, timeout):
         processor = WhisperProcessor.from_pretrained("openai/whisper-large")
         model = TFWhisperForConditionalGeneration.from_pretrained("openai/whisper-large")
 
-        ds = load_dataset("legacy-datasets/common_voice", "ja", split="test", streaming=True, trust_remote_code=True)
+        ds = load_dataset("common_voice", "ja", split="test", streaming=True)
         ds = ds.cast_column("audio", datasets.Audio(sampling_rate=16_000))
         input_speech = next(iter(ds))["audio"]["array"]
         input_features = processor.feature_extractor(raw_speech=input_speech, return_tensors="tf").input_features

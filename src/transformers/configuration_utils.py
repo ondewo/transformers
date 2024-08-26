@@ -13,7 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Configuration base class and utilities."""
+""" Configuration base class and utilities."""
+
 
 import copy
 import json
@@ -26,12 +27,10 @@ from packaging import version
 
 from . import __version__
 from .dynamic_module_utils import custom_object_save
-from .modeling_gguf_pytorch_utils import load_gguf_checkpoint
 from .utils import (
     CONFIG_NAME,
     PushToHubMixin,
     add_model_info_to_auto_map,
-    add_model_info_to_custom_pipelines,
     cached_file,
     copy_func,
     download_url,
@@ -175,6 +174,8 @@ class PretrainedConfig(PushToHubMixin):
 
             This attribute is currently not being used during model loading time, but this may change in the future
             versions. But we can already start preparing for the future by saving the dtype with save_pretrained.
+        attn_implementation (`str`, *optional*):
+            The attention implementation to use in the model. Can be any of `"eager"` (manual implementation of the attention), `"sdpa"` (attention using [`torch.nn.functional.scaled_dot_product_attention`](https://pytorch.org/docs/master/generated/torch.nn.functional.scaled_dot_product_attention.html)), or `"flash_attention_2"` (attention using [Dao-AILab/flash-attention](https://github.com/Dao-AILab/flash-attention)). By default, if available, SDPA will be used for torch>=2.1.1. The default is otherwise the manual `"eager"` implementation.
 
         > TensorFlow specific parameters
 
@@ -214,7 +215,6 @@ class PretrainedConfig(PushToHubMixin):
         self.tie_word_embeddings = kwargs.pop(
             "tie_word_embeddings", True
         )  # Whether input and output word embeddings should be tied for all MLM, LM and Seq2Seq models.
-        self.chunk_size_feed_forward = kwargs.pop("chunk_size_feed_forward", 0)
 
         # Is decoder is used in encoder-decoder models to differentiate encoder from decoder
         self.is_encoder_decoder = kwargs.pop("is_encoder_decoder", False)
@@ -461,7 +461,8 @@ class PretrainedConfig(PushToHubMixin):
                 This can be either:
 
                 - a string, the *model id* of a pretrained model configuration hosted inside a model repo on
-                  huggingface.co.
+                  huggingface.co. Valid model ids can be located at the root-level, like `bert-base-uncased`, or
+                  namespaced under a user or organization name, like `dbmdz/bert-base-german-cased`.
                 - a path to a *directory* containing a configuration file saved using the
                   [`~PretrainedConfig.save_pretrained`] method, e.g., `./my_model_directory/`.
                 - a path or url to a saved configuration JSON *file*, e.g., `./my_model_directory/configuration.json`.
@@ -471,9 +472,9 @@ class PretrainedConfig(PushToHubMixin):
             force_download (`bool`, *optional*, defaults to `False`):
                 Whether or not to force to (re-)download the configuration files and override the cached versions if
                 they exist.
-            resume_download:
-                Deprecated and ignored. All downloads are now resumed by default when possible.
-                Will be removed in v5 of Transformers.
+            resume_download (`bool`, *optional*, defaults to `False`):
+                Whether or not to delete incompletely received file. Attempts to resume the download if such a file
+                exists.
             proxies (`Dict[str, str]`, *optional*):
                 A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
                 'http://hostname': 'foo.bar:4012'}.` The proxies are used on each request.
@@ -514,16 +515,16 @@ class PretrainedConfig(PushToHubMixin):
         # We can't instantiate directly the base class *PretrainedConfig* so let's show the examples on a
         # derived class: BertConfig
         config = BertConfig.from_pretrained(
-            "google-bert/bert-base-uncased"
+            "bert-base-uncased"
         )  # Download configuration from huggingface.co and cache.
         config = BertConfig.from_pretrained(
             "./test/saved_model/"
         )  # E.g. config (or model) was saved using *save_pretrained('./test/saved_model/')*
         config = BertConfig.from_pretrained("./test/saved_model/my_configuration.json")
-        config = BertConfig.from_pretrained("google-bert/bert-base-uncased", output_attentions=True, foo=False)
+        config = BertConfig.from_pretrained("bert-base-uncased", output_attentions=True, foo=False)
         assert config.output_attentions == True
         config, unused_kwargs = BertConfig.from_pretrained(
-            "google-bert/bert-base-uncased", output_attentions=True, foo=False, return_unused_kwargs=True
+            "bert-base-uncased", output_attentions=True, foo=False, return_unused_kwargs=True
         )
         assert config.output_attentions == True
         assert unused_kwargs == {"foo": False}
@@ -583,7 +584,7 @@ class PretrainedConfig(PushToHubMixin):
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         cache_dir = kwargs.pop("cache_dir", None)
         force_download = kwargs.pop("force_download", False)
-        resume_download = kwargs.pop("resume_download", None)
+        resume_download = kwargs.pop("resume_download", False)
         proxies = kwargs.pop("proxies", None)
         token = kwargs.pop("token", None)
         local_files_only = kwargs.pop("local_files_only", False)
@@ -593,8 +594,6 @@ class PretrainedConfig(PushToHubMixin):
         from_pipeline = kwargs.pop("_from_pipeline", None)
         from_auto_class = kwargs.pop("_from_auto", False)
         commit_hash = kwargs.pop("_commit_hash", None)
-
-        gguf_file = kwargs.get("gguf_file", None)
 
         if trust_remote_code is True:
             logger.warning(
@@ -614,10 +613,10 @@ class PretrainedConfig(PushToHubMixin):
             resolved_config_file = pretrained_model_name_or_path
             is_local = True
         elif is_remote_url(pretrained_model_name_or_path):
-            configuration_file = pretrained_model_name_or_path if gguf_file is None else gguf_file
+            configuration_file = pretrained_model_name_or_path
             resolved_config_file = download_url(pretrained_model_name_or_path)
         else:
-            configuration_file = kwargs.pop("_configuration_file", CONFIG_NAME) if gguf_file is None else gguf_file
+            configuration_file = kwargs.pop("_configuration_file", CONFIG_NAME)
 
             try:
                 # Load from local folder or from cache or download from model Hub and cache
@@ -650,12 +649,8 @@ class PretrainedConfig(PushToHubMixin):
                 )
 
         try:
-            if gguf_file:
-                config_dict = load_gguf_checkpoint(resolved_config_file, return_tensors=False)["config"]
-            else:
-                # Load config dict
-                config_dict = cls._dict_from_json_file(resolved_config_file)
-
+            # Load config dict
+            config_dict = cls._dict_from_json_file(resolved_config_file)
             config_dict["_commit_hash"] = commit_hash
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise EnvironmentError(
@@ -670,10 +665,6 @@ class PretrainedConfig(PushToHubMixin):
         if "auto_map" in config_dict and not is_local:
             config_dict["auto_map"] = add_model_info_to_auto_map(
                 config_dict["auto_map"], pretrained_model_name_or_path
-            )
-        if "custom_pipelines" in config_dict and not is_local:
-            config_dict["custom_pipelines"] = add_model_info_to_custom_pipelines(
-                config_dict["custom_pipelines"], pretrained_model_name_or_path
             )
         return config_dict, kwargs
 
@@ -939,7 +930,7 @@ class PretrainedConfig(PushToHubMixin):
             elif isinstance(old_v, float):
                 v = float(v)
             elif not isinstance(old_v, str):
-                raise TypeError(
+                raise ValueError(
                     f"You can only update int, float, bool or string values in the config, got {v} for key {k}"
                 )
 

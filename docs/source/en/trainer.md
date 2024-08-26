@@ -62,7 +62,7 @@ training_args = TrainingArguments(
     per_device_eval_batch_size=16,
     num_train_epochs=2,
     weight_decay=0.01,
-    eval_strategy="epoch",
+    evaluation_strategy="epoch",
     save_strategy="epoch",
     load_best_model_at_end=True,
     push_to_hub=True,
@@ -104,7 +104,7 @@ trainer.train(resume_from_checkpoint="your-model/checkpoint-1000")
 You can save your checkpoints (the optimizer state is not saved by default) to the Hub by setting `push_to_hub=True` in [`TrainingArguments`] to commit and push them. Other options for deciding how your checkpoints are saved are set up in the [`hub_strategy`](https://huggingface.co/docs/transformers/main_classes/trainer#transformers.TrainingArguments.hub_strategy) parameter:
 
 * `hub_strategy="checkpoint"` pushes the latest checkpoint to a subfolder named "last-checkpoint" from which you can resume training
-* `hub_strategy="all_checkpoints"` pushes all checkpoints to the directory defined in `output_dir` (you'll see one checkpoint per folder in your model repository)
+* `hug_strategy="all_checkpoints"` pushes all checkpoints to the directory defined in `output_dir` (you'll see one checkpoint per folder in your model repository)
 
 When you resume training from a checkpoint, the [`Trainer`] tries to keep the Python, NumPy, and PyTorch RNG states the same as they were when the checkpoint was saved. But because PyTorch has various non-deterministic default settings, the RNG states aren't guaranteed to be the same. If you want to enable full determinism, take a look at the [Controlling sources of randomness](https://pytorch.org/docs/stable/notes/randomness#controlling-sources-of-randomness) guide to learn what you can enable to make your training fully deterministic. Keep in mind though that by making certain settings deterministic, training may be slower.
 
@@ -522,12 +522,6 @@ This script demonstrates how to fine-tune the `google/gemma-2b` model on the IMD
 
 The [`Trainer`] class is powered by [Accelerate](https://hf.co/docs/accelerate), a library for easily training PyTorch models in distributed environments with support for integrations such as [FullyShardedDataParallel (FSDP)](https://pytorch.org/blog/introducing-pytorch-fully-sharded-data-parallel-api/) and [DeepSpeed](https://www.deepspeed.ai/).
 
-<Tip>
-
-Learn more about FSDP sharding strategies, CPU offloading, and more with the [`Trainer`] in the [Fully Sharded Data Parallel](fsdp) guide.
-
-</Tip>
-
 To use Accelerate with [`Trainer`], run the [`accelerate.config`](https://huggingface.co/docs/accelerate/package_reference/cli#accelerate-config) command to set up training for your training environment. This command creates a `config_file.yaml` that'll be used when you launch your training script. For example, some example configurations you can setup are:
 
 <hfoptions id="config">
@@ -642,7 +636,7 @@ For example, to run the [run_glue.py](https://github.com/huggingface/transformer
 ```bash
 accelerate launch \
     ./examples/pytorch/text-classification/run_glue.py \
-    --model_name_or_path google-bert/bert-base-cased \
+    --model_name_or_path bert-base-cased \
     --task_name $TASK_NAME \
     --do_train \
     --do_eval \
@@ -665,7 +659,7 @@ accelerate launch --num_processes=2 \
     --fsdp_sharding_strategy=1 \
     --fsdp_state_dict_type=FULL_STATE_DICT \
     ./examples/pytorch/text-classification/run_glue.py
-    --model_name_or_path google-bert/bert-base-cased \
+    --model_name_or_path bert-base-cased \
     --task_name $TASK_NAME \
     --do_train \
     --do_eval \

@@ -43,7 +43,6 @@ class DPTImageProcessingTester(unittest.TestCase):
         image_mean=[0.5, 0.5, 0.5],
         image_std=[0.5, 0.5, 0.5],
     ):
-        super().__init__()
         size = size if size is not None else {"height": 18, "width": 18}
         self.parent = parent
         self.batch_size = batch_size
@@ -87,7 +86,6 @@ class DPTImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
     image_processing_class = DPTImageProcessor if is_vision_available() else None
 
     def setUp(self):
-        super().setUp()
         self.image_processor_tester = DPTImageProcessingTester(self)
 
     @property
@@ -128,13 +126,3 @@ class DPTImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
         ).pixel_values
         self.assertTrue(pixel_values.shape[2] % 4 == 0)
         self.assertTrue(pixel_values.shape[3] % 4 == 0)
-
-    def test_keep_aspect_ratio(self):
-        size = {"height": 512, "width": 512}
-        image_processor = DPTImageProcessor(size=size, keep_aspect_ratio=True, ensure_multiple_of=32)
-
-        image = np.zeros((489, 640, 3))
-
-        pixel_values = image_processor(image, return_tensors="pt").pixel_values
-
-        self.assertEqual(list(pixel_values.shape), [1, 3, 512, 672])
