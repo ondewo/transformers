@@ -45,13 +45,13 @@ class EncoderDecoderConfig(PretrainedConfig):
     ```python
     >>> from transformers import BertConfig, EncoderDecoderConfig, EncoderDecoderModel
 
-    >>> # Initializing a BERT bert-base-uncased style configuration
+    >>> # Initializing a BERT google-bert/bert-base-uncased style configuration
     >>> config_encoder = BertConfig()
     >>> config_decoder = BertConfig()
 
     >>> config = EncoderDecoderConfig.from_encoder_decoder_configs(config_encoder, config_decoder)
 
-    >>> # Initializing a Bert2Bert model (with random weights) from the bert-base-uncased style configurations
+    >>> # Initializing a Bert2Bert model (with random weights) from the google-bert/bert-base-uncased style configurations
     >>> model = EncoderDecoderModel(config=config)
 
     >>> # Accessing the model configuration
@@ -74,9 +74,11 @@ class EncoderDecoderConfig(PretrainedConfig):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        assert (
-            "encoder" in kwargs and "decoder" in kwargs
-        ), "Config has to be initialized with encoder and decoder config"
+        if "encoder" not in kwargs or "decoder" not in kwargs:
+            raise ValueError(
+                f"A configuraton of type {self.model_type} cannot be instantiated because "
+                f"both `encoder` and `decoder` sub-configurations were not passed, only {kwargs}"
+            )
         encoder_config = kwargs.pop("encoder")
         encoder_model_type = encoder_config.pop("model_type")
         decoder_config = kwargs.pop("decoder")
