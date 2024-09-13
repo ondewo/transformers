@@ -15,11 +15,12 @@ import shutil
 import tempfile
 import unittest
 
-import numpy as np
 import pytest
 
 from transformers.testing_utils import require_torch, require_vision
 from transformers.utils import is_torch_available, is_vision_available
+
+from ...test_processing_common import ProcessorTesterMixin
 
 
 if is_torch_available():
@@ -28,8 +29,6 @@ else:
     is_torch_greater_or_equal_than_1_11 = False
 
 if is_vision_available():
-    from PIL import Image
-
     from transformers import (
         AutoProcessor,
         Pix2StructImageProcessor,
@@ -45,7 +44,9 @@ if is_vision_available():
 )
 @require_vision
 @require_torch
-class Pix2StructProcessorTest(unittest.TestCase):
+class Pix2StructProcessorTest(ProcessorTesterMixin, unittest.TestCase):
+    processor_class = Pix2StructProcessor
+
     def setUp(self):
         self.tmpdirname = tempfile.mkdtemp()
 
@@ -64,17 +65,6 @@ class Pix2StructProcessorTest(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmpdirname)
-
-    def prepare_image_inputs(self):
-        """
-        This function prepares a list of random PIL images of the same fixed size.
-        """
-
-        image_inputs = [np.random.randint(255, size=(3, 30, 400), dtype=np.uint8)]
-
-        image_inputs = [Image.fromarray(np.moveaxis(x, 0, -1)) for x in image_inputs]
-
-        return image_inputs
 
     def test_save_load_pretrained_additional_features(self):
         processor = Pix2StructProcessor(tokenizer=self.get_tokenizer(), image_processor=self.get_image_processor())

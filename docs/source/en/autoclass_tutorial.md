@@ -68,7 +68,7 @@ For vision tasks, an image processor processes the image into the correct input 
 
 ## AutoFeatureExtractor
 
-For audio tasks, a feature extractor processes the audio signal the correct input format.
+For audio tasks, a feature extractor processes the audio signal into the correct input format.
 
 Load a feature extractor with [`AutoFeatureExtractor.from_pretrained`]:
 

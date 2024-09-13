@@ -217,7 +217,7 @@ At this point, only three steps remain:
 ...     save_total_limit=3,
 ...     num_train_epochs=2,
 ...     predict_with_generate=True,
-...     fp16=True,
+...     fp16=True, #change to bf16=True for XPU
 ...     push_to_hub=True,
 ... )
 
@@ -348,7 +348,10 @@ The simplest way to try out your finetuned model for inference is to use it in a
 ```py
 >>> from transformers import pipeline
 
->>> translator = pipeline("translation", model="my_awesome_opus_books_model")
+# Change `xx` to the language of the input and `yy` to the language of the desired output.
+# Examples: "en" for English, "fr" for French, "de" for German, "es" for Spanish, "zh" for Chinese, etc; translation_en_to_fr translates English to French
+# You can view all the lists of languages here - https://huggingface.co/languages
+>>> translator = pipeline("translation_xx_to_yy", model="username/my_awesome_opus_books_model")
 >>> translator(text)
 [{'translation_text': 'Legumes partagent des ressources avec des bactéries azotantes.'}]
 ```
@@ -362,7 +365,7 @@ Tokenize the text and return the `input_ids` as PyTorch tensors:
 ```py
 >>> from transformers import AutoTokenizer
 
->>> tokenizer = AutoTokenizer.from_pretrained("my_awesome_opus_books_model")
+>>> tokenizer = AutoTokenizer.from_pretrained("username/my_awesome_opus_books_model")
 >>> inputs = tokenizer(text, return_tensors="pt").input_ids
 ```
 
@@ -371,7 +374,7 @@ Use the [`~transformers.generation_utils.GenerationMixin.generate`] method to cr
 ```py
 >>> from transformers import AutoModelForSeq2SeqLM
 
->>> model = AutoModelForSeq2SeqLM.from_pretrained("my_awesome_opus_books_model")
+>>> model = AutoModelForSeq2SeqLM.from_pretrained("username/my_awesome_opus_books_model")
 >>> outputs = model.generate(inputs, max_new_tokens=40, do_sample=True, top_k=30, top_p=0.95)
 ```
 
@@ -388,7 +391,7 @@ Tokenize the text and return the `input_ids` as TensorFlow tensors:
 ```py
 >>> from transformers import AutoTokenizer
 
->>> tokenizer = AutoTokenizer.from_pretrained("my_awesome_opus_books_model")
+>>> tokenizer = AutoTokenizer.from_pretrained("username/my_awesome_opus_books_model")
 >>> inputs = tokenizer(text, return_tensors="tf").input_ids
 ```
 
@@ -397,7 +400,7 @@ Use the [`~transformers.generation_tf_utils.TFGenerationMixin.generate`] method 
 ```py
 >>> from transformers import TFAutoModelForSeq2SeqLM
 
->>> model = TFAutoModelForSeq2SeqLM.from_pretrained("my_awesome_opus_books_model")
+>>> model = TFAutoModelForSeq2SeqLM.from_pretrained("username/my_awesome_opus_books_model")
 >>> outputs = model.generate(inputs, max_new_tokens=40, do_sample=True, top_k=30, top_p=0.95)
 ```
 

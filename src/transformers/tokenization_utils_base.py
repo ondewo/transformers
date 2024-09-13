@@ -27,7 +27,7 @@ from collections import UserDict
 from collections.abc import Mapping, Sized
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import lru_cache
+from inspect import isfunction
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -50,6 +50,7 @@ from .utils import (
     is_jax_tensor,
     is_numpy_array,
     is_offline_mode,
+    is_protobuf_available,
     is_remote_url,
     is_tf_available,
     is_tf_tensor,
@@ -61,6 +62,8 @@ from .utils import (
     requires_backends,
     to_py_obj,
 )
+from .utils.chat_template_utils import _compile_jinja_template, _render_with_assistant_indices
+from .utils.import_utils import PROTOBUF_IMPORT_ERROR
 
 
 if TYPE_CHECKING:
@@ -71,6 +74,16 @@ if TYPE_CHECKING:
     if is_flax_available():
         import jax.numpy as jnp  # noqa: F401
     from .pipelines.conversational import Conversation
+
+
+
+def import_protobuf_decode_error(error_message=""):
+    if is_protobuf_available():
+        from google.protobuf.message import DecodeError
+
+        return DecodeError
+    else:
+        raise ImportError(PROTOBUF_IMPORT_ERROR.format(error_message))
 
 
 if is_tokenizers_available():
@@ -194,7 +207,8 @@ class BatchEncoding(UserDict):
             You can give a tensor_type here to convert the lists of integers in PyTorch/TensorFlow/Numpy Tensors at
             initialization.
         prepend_batch_axis (`bool`, *optional*, defaults to `False`):
-            Whether or not to add a batch axis when converting to tensors (see `tensor_type` above).
+            Whether or not to add a batch axis when converting to tensors (see `tensor_type` above). Note that this
+            parameter has an effect if the parameter `tensor_type` is set, *otherwise has no effect*.
         n_sequences (`Optional[int]`, *optional*):
             You can give a tensor_type here to convert the lists of integers in PyTorch/TensorFlow/Numpy Tensors at
             initialization.
@@ -716,7 +730,7 @@ class BatchEncoding(UserDict):
 
             def as_tensor(value, dtype=None):
                 if isinstance(value, list) and isinstance(value[0], np.ndarray):
-                    return torch.tensor(np.array(value))
+                    return torch.from_numpy(np.array(value))
                 return torch.tensor(value)
 
         elif tensor_type == TensorType.JAX:
@@ -1399,6 +1413,9 @@ ENCODE_KWARGS_DOCSTRING = r"""
                 If set will pad the sequence to a multiple of the provided value. Requires `padding` to be activated.
                 This is especially useful to enable the use of Tensor Cores on NVIDIA hardware with compute capability
                 `>= 7.5` (Volta).
+            padding_side (`str`, *optional*):
+                The side on which the model should have padding applied. Should be selected between ['right', 'left'].
+                Default value is picked from the class attribute of the same name.
             return_tensors (`str` or [`~utils.TensorType`], *optional*):
                 If set, will return tensors instead of list of python integers. Acceptable values are:
 
@@ -1679,6 +1696,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         conversation: Union[List[Dict[str, str]], "Conversation"],
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = False,
+        continue_final_message: bool = False,
         tokenize: bool = True,
         padding: bool = False,
         truncation: bool = False,
@@ -1695,12 +1713,31 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         Args:
             conversation (Union[List[Dict[str, str]], "Conversation"]): A Conversation object or list of dicts
                 with "role" and "content" keys, representing the chat history so far.
-            chat_template (str, *optional*): A Jinja template to use for this conversion. If
-                this is not passed, the model's default chat template will be used instead.
-            add_generation_prompt (bool, *optional*): Whether to end the prompt with the token(s) that indicate
-                the start of an assistant message. This is useful when you want to generate a response from the model.
+            tools (`List[Dict]`, *optional*):
+                A list of tools (callable functions) that will be accessible to the model. If the template does not
+                support function calling, this argument will have no effect. Each tool should be passed as a JSON Schema,
+                giving the name, description and argument types for the tool. See our
+                [chat templating guide](https://huggingface.co/docs/transformers/main/en/chat_templating#automated-function-conversion-for-tool-use)
+                for more information.
+            documents (`List[Dict[str, str]]`, *optional*):
+                A list of dicts representing documents that will be accessible to the model if it is performing RAG
+                (retrieval-augmented generation). If the template does not support RAG, this argument will have no
+                effect. We recommend that each document should be a dict containing "title" and "text" keys. Please
+                see the RAG section of the [chat templating guide](https://huggingface.co/docs/transformers/main/en/chat_templating#arguments-for-RAG)
+                for examples of passing documents with chat templates.
+            chat_template (`str`, *optional*):
+                A Jinja template to use for this conversion. It is usually not necessary to pass anything to this
+                argument, as the model's template will be used by default.
+            add_generation_prompt (bool, *optional*):
+                If this is set, a prompt with the token(s) that indicate
+                the start of an assistant message will be appended to the formatted output. This is useful when you want to generate a response from the model.
                 Note that this argument will be passed to the chat template, and so it must be supported in the
                 template for this argument to have any effect.
+            continue_final_message (bool, *optional*):
+                If this is set, the chat will be formatted so that the final
+                message in the chat is open-ended, without any EOS tokens. The model will continue this message
+                rather than starting a new one. This allows you to "prefill" part of
+                the model's response for it. Cannot be used at the same time as `add_generation_prompt`.
             tokenize (`bool`, defaults to `True`):
                 Whether to tokenize the output. If `False`, the output will be a string.
             padding (`bool`, defaults to `False`):
@@ -1736,11 +1773,78 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 chat_template = self.default_chat_template
 
         # Compilation function uses a cache to avoid recompiling the same template
-        compiled_template = self._compile_jinja_template(chat_template)
+        compiled_template = _compile_jinja_template(chat_template)
 
-        rendered = compiled_template.render(
-            messages=conversation, add_generation_prompt=add_generation_prompt, **self.special_tokens_map
-        )
+        if isinstance(conversation, (list, tuple)) and (
+            isinstance(conversation[0], (list, tuple)) or hasattr(conversation[0], "messages")
+        ):
+            conversations = conversation
+            is_batched = True
+        else:
+            conversations = [conversation]
+            is_batched = False
+
+        if continue_final_message:
+            if add_generation_prompt:
+                raise ValueError(
+                    "continue_final_message and add_generation_prompt are not compatible. Use continue_final_message when you want the model to continue the final message, and add_generation_prompt when you want to add a header that will prompt it to start a new assistant message instead."
+                )
+            if return_assistant_tokens_mask:
+                raise ValueError("continue_final_message is not compatible with return_assistant_tokens_mask.")
+
+        # We accept either JSON schemas or functions for tools. If we get functions, we convert them to schemas
+        if tools is not None:
+            tool_schemas = []
+            for tool in tools:
+                if isinstance(tool, dict):
+                    tool_schemas.append(tool)
+                elif isfunction(tool):
+                    tool_schemas.append(get_json_schema(tool))
+                else:
+                    raise ValueError(
+                        "Tools should either be a JSON schema, or a callable function with type hints "
+                        "and a docstring suitable for auto-conversion to a schema."
+                    )
+        else:
+            tool_schemas = None
+
+        if documents is not None:
+            for document in documents:
+                if not isinstance(document, dict):
+                    raise TypeError("Documents should be a list of dicts with 'title' and 'text' keys!")
+
+        rendered = []
+        all_generation_indices = []
+        template_kwargs = {**self.special_tokens_map, **kwargs}  # kwargs overwrite special tokens if both are present
+        for chat in conversations:
+            if hasattr(chat, "messages"):
+                # Indicates it's a Conversation object
+                chat = chat.messages
+            if return_assistant_tokens_mask:
+                rendered_chat, generation_indices = _render_with_assistant_indices(
+                    compiled_template=compiled_template,
+                    messages=chat,
+                    tools=tool_schemas,
+                    documents=documents,
+                    add_generation_prompt=add_generation_prompt,
+                    **template_kwargs,
+                )
+                all_generation_indices.append(generation_indices)
+            else:
+                rendered_chat = compiled_template.render(
+                    messages=chat,
+                    tools=tool_schemas,
+                    documents=documents,
+                    add_generation_prompt=add_generation_prompt,
+                    **template_kwargs,
+                )
+            if continue_final_message:
+                final_message = chat[-1]["content"]
+                rendered_chat = rendered_chat[: rendered_chat.rindex(final_message) + len(final_message)].rstrip()
+            rendered.append(rendered_chat)
+
+        if not is_batched:
+            rendered = rendered[0]
 
         if padding is True:
             padding = "max_length"  # There's only one sequence here, so "longest" makes no sense
@@ -1757,29 +1861,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         else:
             return rendered
 
-    @lru_cache
-    def _compile_jinja_template(self, chat_template):
-        try:
-            import jinja2
-            from jinja2.exceptions import TemplateError
-            from jinja2.sandbox import ImmutableSandboxedEnvironment
-        except ImportError:
-            raise ImportError("apply_chat_template requires jinja2 to be installed.")
-
-        if version.parse(jinja2.__version__) <= version.parse("3.0.0"):
-            raise ImportError(
-                "apply_chat_template requires jinja2>=3.0.0 to be installed. Your version is " f"{jinja2.__version__}."
-            )
-
-        def raise_exception(message):
-            raise TemplateError(message)
-
-        jinja_env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
-        jinja_env.globals["raise_exception"] = raise_exception
-        return jinja_env.from_string(chat_template)
-
-    @property
-    def default_chat_template(self):
+    def get_chat_template(self, chat_template: Optional[str] = None, tools: Optional[List[Dict]] = None) -> str:
         """
         This template formats inputs in the standard ChatML format. See
         https://github.com/openai/openai-python/blob/main/chatml.md
@@ -2258,11 +2340,31 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         # Instantiate the tokenizer.
         try:
             tokenizer = cls(*init_inputs, **init_kwargs)
+        except import_protobuf_decode_error():
+            logger.info(
+                "Unable to load tokenizer model from SPM, loading from TikToken will be attempted instead."
+                "(Google protobuf error: Tried to load SPM model with non-SPM vocab file).",
+            )
+            return False
+        except RuntimeError as e:
+            if "sentencepiece_processor.cc" in str(e):
+                logger.info(
+                    "Unable to load tokenizer model from SPM, loading from TikToken will be attempted instead."
+                    "(SentencePiece RuntimeError: Tried to load SPM model with non-SPM vocab file).",
+                )
+            return False
         except OSError:
             raise OSError(
                 "Unable to load vocabulary from file. "
                 "Please check that the provided vocabulary is accessible and not corrupted."
             )
+        except RuntimeError as e:
+            if "sentencepiece_processor.cc" in str(e):
+                logger.info(
+                    "Unable to load tokenizer model from SPM, loading from TikToken will be attempted instead."
+                    "(SentencePiece RuntimeError: Tried to load SPM model with non-SPM vocab file).",
+                )
+                return False
 
         if added_tokens_decoder != {} and max(list(added_tokens_decoder.keys())[-1], 0) > tokenizer.vocab_size:
             logger.warning_advice(
@@ -2552,6 +2654,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         truncation: Union[bool, str, TruncationStrategy] = None,
         max_length: Optional[int] = None,
         stride: int = 0,
+        padding_side: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         **kwargs,
     ) -> List[int]:
@@ -2578,6 +2681,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             truncation=truncation,
             max_length=max_length,
             stride=stride,
+            padding_side=padding_side,
             return_tensors=return_tensors,
             **kwargs,
         )
@@ -2741,6 +2845,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         stride: int = 0,
         is_split_into_words: bool = False,
         pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_token_type_ids: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
@@ -2782,6 +2887,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             "stride": stride,
             "is_split_into_words": is_split_into_words,
             "pad_to_multiple_of": pad_to_multiple_of,
+            "padding_side": padding_side,
             "return_tensors": return_tensors,
             "return_token_type_ids": return_token_type_ids,
             "return_attention_mask": return_attention_mask,
@@ -2825,6 +2931,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         stride: int = 0,
         is_split_into_words: bool = False,
         pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_token_type_ids: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
@@ -2894,6 +3001,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 stride=stride,
                 is_split_into_words=is_split_into_words,
                 pad_to_multiple_of=pad_to_multiple_of,
+                padding_side=padding_side,
                 return_tensors=return_tensors,
                 return_token_type_ids=return_token_type_ids,
                 return_attention_mask=return_attention_mask,
@@ -2915,6 +3023,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 stride=stride,
                 is_split_into_words=is_split_into_words,
                 pad_to_multiple_of=pad_to_multiple_of,
+                padding_side=padding_side,
                 return_tensors=return_tensors,
                 return_token_type_ids=return_token_type_ids,
                 return_attention_mask=return_attention_mask,
@@ -2938,6 +3047,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         stride: int = 0,
         is_split_into_words: bool = False,
         pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_token_type_ids: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
@@ -2988,6 +3098,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             stride=stride,
             is_split_into_words=is_split_into_words,
             pad_to_multiple_of=pad_to_multiple_of,
+            padding_side=padding_side,
             return_tensors=return_tensors,
             return_token_type_ids=return_token_type_ids,
             return_attention_mask=return_attention_mask,
@@ -3010,6 +3121,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         stride: int = 0,
         is_split_into_words: bool = False,
         pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_token_type_ids: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
@@ -3040,6 +3152,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         stride: int = 0,
         is_split_into_words: bool = False,
         pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_token_type_ids: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
@@ -3085,6 +3198,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             stride=stride,
             is_split_into_words=is_split_into_words,
             pad_to_multiple_of=pad_to_multiple_of,
+            padding_side=padding_side,
             return_tensors=return_tensors,
             return_token_type_ids=return_token_type_ids,
             return_attention_mask=return_attention_mask,
@@ -3113,6 +3227,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         stride: int = 0,
         is_split_into_words: bool = False,
         pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_token_type_ids: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
@@ -3137,6 +3252,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         padding: Union[bool, str, PaddingStrategy] = True,
         max_length: Optional[int] = None,
         pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         verbose: bool = True,
@@ -3185,6 +3301,9 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
 
                 This is especially useful to enable the use of Tensor Cores on NVIDIA hardware with compute capability
                 `>= 7.5` (Volta).
+            padding_side (`str`, *optional*):
+                The side on which the model should have padding applied. Should be selected between ['right', 'left'].
+                Default value is picked from the class attribute of the same name.
             return_attention_mask (`bool`, *optional*):
                 Whether to return the attention mask. If left to the default, will return the attention mask according
                 to the specific tokenizer's default, defined by the `return_outputs` attribute.
@@ -3267,6 +3386,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 max_length=max_length,
                 padding_strategy=padding_strategy,
                 pad_to_multiple_of=pad_to_multiple_of,
+                padding_side=padding_side,
                 return_attention_mask=return_attention_mask,
             )
             return BatchEncoding(encoded_inputs, tensor_type=return_tensors)
@@ -3288,6 +3408,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 max_length=max_length,
                 padding_strategy=padding_strategy,
                 pad_to_multiple_of=pad_to_multiple_of,
+                padding_side=padding_side,
                 return_attention_mask=return_attention_mask,
             )
 
@@ -3349,6 +3470,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         max_length: Optional[int] = None,
         stride: int = 0,
         pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_token_type_ids: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
@@ -3462,6 +3584,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 max_length=max_length,
                 padding=padding_strategy.value,
                 pad_to_multiple_of=pad_to_multiple_of,
+                padding_side=padding_side,
                 return_attention_mask=return_attention_mask,
             )
 
@@ -3599,6 +3722,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         max_length: Optional[int] = None,
         padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
         pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
     ) -> dict:
         """
@@ -3614,13 +3738,16 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 - PaddingStrategy.LONGEST Pad to the longest sequence in the batch
                 - PaddingStrategy.MAX_LENGTH: Pad to the max length (default)
                 - PaddingStrategy.DO_NOT_PAD: Do not pad
-                The tokenizer padding sides are defined in self.padding_side:
+                The tokenizer padding sides are defined in `padding_side` argument:
 
                     - 'left': pads on the left of the sequences
                     - 'right': pads on the right of the sequences
             pad_to_multiple_of: (optional) Integer if set will pad the sequence to a multiple of the provided value.
                 This is especially useful to enable the use of Tensor Core on NVIDIA hardware with compute capability
                 `>= 7.5` (Volta).
+            padding_side:
+                The side on which the model should have padding applied. Should be selected between ['right', 'left'].
+                Default value is picked from the class attribute of the same name.
             return_attention_mask:
                 (optional) Set to False to avoid returning attention mask (default: set to model specifics)
         """
@@ -3644,8 +3771,9 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
 
         if needs_to_be_padded:
             difference = max_length - len(required_input)
+            padding_side = padding_side if padding_side is not None else self.padding_side
 
-            if self.padding_side == "right":
+            if padding_side == "right":
                 if return_attention_mask:
                     encoded_inputs["attention_mask"] = encoded_inputs["attention_mask"] + [0] * difference
                 if "token_type_ids" in encoded_inputs:
@@ -3655,7 +3783,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 if "special_tokens_mask" in encoded_inputs:
                     encoded_inputs["special_tokens_mask"] = encoded_inputs["special_tokens_mask"] + [1] * difference
                 encoded_inputs[self.model_input_names[0]] = required_input + [self.pad_token_id] * difference
-            elif self.padding_side == "left":
+            elif padding_side == "left":
                 if return_attention_mask:
                     encoded_inputs["attention_mask"] = [0] * difference + encoded_inputs["attention_mask"]
                 if "token_type_ids" in encoded_inputs:
@@ -3666,7 +3794,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                     encoded_inputs["special_tokens_mask"] = [1] * difference + encoded_inputs["special_tokens_mask"]
                 encoded_inputs[self.model_input_names[0]] = [self.pad_token_id] * difference + required_input
             else:
-                raise ValueError("Invalid padding strategy:" + str(self.padding_side))
+                raise ValueError(f"Invalid padding strategy:{padding_side}")
 
         return encoded_inputs
 

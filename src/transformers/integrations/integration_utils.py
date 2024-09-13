@@ -891,9 +891,11 @@ class CometCallback(TrainerCallback):
         if not self._initialized:
             self.setup(args, state, model)
         if state.is_world_process_zero:
-            experiment = comet_ml.config.get_global_experiment()
-            if experiment is not None:
-                experiment._log_metrics(logs, step=state.global_step, epoch=state.epoch, framework="transformers")
+            if self._experiment is not None:
+                rewritten_logs = rewrite_logs(logs)
+                self._experiment.__internal_api__log_metrics__(
+                    rewritten_logs, step=state.global_step, epoch=state.epoch, framework="transformers"
+                )
 
     def on_train_end(self, args, state, control, **kwargs):
         if self._initialized and state.is_world_process_zero:
@@ -905,6 +907,15 @@ class CometCallback(TrainerCallback):
                         args.output_dir, recursive=True, log_file_name=True, step=state.global_step
                     )
                 experiment.end()
+
+    def on_predict(self, args, state, control, metrics, **kwargs):
+        if not self._initialized:
+            self.setup(args, state, model=None)
+        if state.is_world_process_zero and self._experiment is not None:
+            rewritten_metrics = rewrite_logs(metrics)
+            self._experiment.__internal_api__log_metrics__(
+                rewritten_metrics, step=state.global_step, epoch=state.epoch, framework="transformers"
+            )
 
 
 class AzureMLCallback(TrainerCallback):

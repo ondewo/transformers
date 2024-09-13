@@ -24,6 +24,7 @@ import sentencepiece as spm
 
 from ...tokenization_utils import AddedToken, PreTrainedTokenizer
 from ...utils import logging
+from ...utils.import_utils import export
 
 
 logger = logging.get_logger(__name__)
@@ -56,6 +57,7 @@ PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
 SPIECE_UNDERLINE = "▁"
 
 
+@export(backends=("sentencepiece",))
 class AlbertTokenizer(PreTrainedTokenizer):
     """
     Construct an ALBERT tokenizer. Based on [SentencePiece](https://github.com/google/sentencepiece).
@@ -369,3 +371,6 @@ class AlbertTokenizer(PreTrainedTokenizer):
                 fi.write(content_spiece_model)
 
         return (out_vocab_file,)
+
+
+__all__ = ["AlbertTokenizer"]

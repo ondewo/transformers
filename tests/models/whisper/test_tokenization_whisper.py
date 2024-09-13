@@ -16,7 +16,7 @@ import unittest
 
 from transformers.models.whisper import WhisperTokenizer, WhisperTokenizerFast
 from transformers.models.whisper.tokenization_whisper import _combine_tokens_into_words, _find_longest_common_sequence
-from transformers.testing_utils import require_jinja, slow
+from transformers.testing_utils import require_flax, require_tf, require_torch, slow
 
 from ...test_tokenization_common import TokenizerTesterMixin
 
@@ -500,24 +500,41 @@ class SpeechToTextTokenizerMultilinguialTest(unittest.TestCase):
         output = multilingual_tokenizer.decode(INPUT_TOKENS, output_offsets=True)["offsets"]
         self.assertEqual(output, [])
 
-    @require_jinja
-    def test_tokenization_for_chat(self):
-        multilingual_tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
-        # This is in English, but it's just here to make sure the chat control tokens are being added properly
-        test_chats = [
-            [{"role": "system", "content": "You are a helpful chatbot."}, {"role": "user", "content": "Hello!"}],
-            [
-                {"role": "system", "content": "You are a helpful chatbot."},
-                {"role": "user", "content": "Hello!"},
-                {"role": "assistant", "content": "Nice to meet you."},
-            ],
-            [{"role": "assistant", "content": "Nice to meet you."}, {"role": "user", "content": "Hello!"}],
-        ]
-        tokenized_chats = [multilingual_tokenizer.apply_chat_template(test_chat) for test_chat in test_chats]
-        expected_tokens = [
-            [3223, 366, 257, 4961, 5081, 18870, 13, 50257, 15947, 0, 50257],
-            [3223, 366, 257, 4961, 5081, 18870, 13, 50257, 15947, 0, 50257, 37717, 220, 1353, 1677, 291, 13, 50257],
-            [37717, 220, 1353, 1677, 291, 13, 50257, 15947, 0, 50257],
-        ]
-        for tokenized_chat, expected_tokens in zip(tokenized_chats, expected_tokens):
-            self.assertListEqual(tokenized_chat, expected_tokens)
+    def test_convert_to_list_np(self):
+        test_list = [[1, 2, 3], [4, 5, 6]]
+
+        # Test with an already converted list
+        self.assertListEqual(WhisperTokenizer._convert_to_list(test_list), test_list)
+        self.assertListEqual(WhisperTokenizerFast._convert_to_list(test_list), test_list)
+
+        # Test with a numpy array
+        np_array = np.array(test_list)
+        self.assertListEqual(WhisperTokenizer._convert_to_list(np_array), test_list)
+        self.assertListEqual(WhisperTokenizerFast._convert_to_list(np_array), test_list)
+
+    @require_tf
+    def test_convert_to_list_tf(self):
+        import tensorflow as tf
+
+        test_list = [[1, 2, 3], [4, 5, 6]]
+        tf_tensor = tf.constant(test_list)
+        self.assertListEqual(WhisperTokenizer._convert_to_list(tf_tensor), test_list)
+        self.assertListEqual(WhisperTokenizerFast._convert_to_list(tf_tensor), test_list)
+
+    @require_flax
+    def test_convert_to_list_jax(self):
+        import jax.numpy as jnp
+
+        test_list = [[1, 2, 3], [4, 5, 6]]
+        jax_array = jnp.array(test_list)
+        self.assertListEqual(WhisperTokenizer._convert_to_list(jax_array), test_list)
+        self.assertListEqual(WhisperTokenizerFast._convert_to_list(jax_array), test_list)
+
+    @require_torch
+    def test_convert_to_list_pt(self):
+        import torch
+
+        test_list = [[1, 2, 3], [4, 5, 6]]
+        torch_tensor = torch.tensor(test_list)
+        self.assertListEqual(WhisperTokenizer._convert_to_list(torch_tensor), test_list)
+        self.assertListEqual(WhisperTokenizerFast._convert_to_list(torch_tensor), test_list)

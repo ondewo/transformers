@@ -52,6 +52,10 @@ class DocumentQuestionAnsweringTool(PipelineTool):
         decoder_input_ids = self.pre_processor.tokenizer(
             prompt, add_special_tokens=False, return_tensors="pt"
         ).input_ids
+        if isinstance(document, str):
+            img = Image.open(document).convert("RGB")
+            img_array = np.array(img).transpose(2, 0, 1)
+            document = torch.from_numpy(img_array)
         pixel_values = self.pre_processor(document, return_tensors="pt").pixel_values
 
         return {"decoder_input_ids": decoder_input_ids, "pixel_values": pixel_values}

@@ -20,6 +20,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from ..pytorch_utils import isin_mps_friendly
 from ..utils import add_start_docstrings
 from ..utils.logging import get_logger
 
@@ -149,11 +150,12 @@ class MinLengthLogitsProcessor(LogitsProcessor):
 
     @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        cur_len = input_ids.shape[-1]
-        if cur_len < self.min_length:
-            for i in self.eos_token_id:
-                scores[:, i] = -float("inf")
-        return scores
+        vocab_tensor = torch.arange(scores.shape[-1], device=scores.device)
+        eos_token_mask = isin_mps_friendly(vocab_tensor, self.eos_token_id)
+        scores_processed = scores.clone()
+        if input_ids.shape[-1] < self.min_length:
+            scores_processed = torch.where(eos_token_mask, -math.inf, scores)
+        return scores_processed
 
 
 class MinNewTokensLengthLogitsProcessor(LogitsProcessor):
@@ -211,6 +213,9 @@ class MinNewTokensLengthLogitsProcessor(LogitsProcessor):
     @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         new_tokens_length = input_ids.shape[-1] - self.prompt_length_to_skip
+        scores_processed = scores.clone()
+        vocab_tensor = torch.arange(scores.shape[-1], device=scores.device)
+        eos_token_mask = isin_mps_friendly(vocab_tensor, self.eos_token_id)
         if new_tokens_length < self.min_new_tokens:
             for i in self.eos_token_id:
                 scores[:, i] = -float("inf")
@@ -1659,8 +1664,11 @@ class SuppressTokensAtBeginLogitsProcessor(LogitsProcessor):
 
     @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        if input_ids.shape[1] == self.begin_index:
-            scores[:, self.begin_suppress_tokens] = -float("inf")
+        vocab_tensor = torch.arange(scores.shape[-1], device=scores.device)
+        suppress_token_mask = isin_mps_friendly(vocab_tensor, self.begin_suppress_tokens)
+        scores_processed = scores
+        if input_ids.shape[-1] == self.begin_index:
+            scores_processed = torch.where(suppress_token_mask, -float("inf"), scores)
 
         return scores
 
@@ -1699,58 +1707,9 @@ class SuppressTokensLogitsProcessor(LogitsProcessor):
 
     @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        scores[:, self.suppress_tokens] = -float("inf")
-        return scores
-
-
-class ForceTokensLogitsProcessor(LogitsProcessor):
-    r"""
-    This processor takes a list of pairs of integers which indicates a mapping from generation indices to token
-    indices that will be forced before generation. The processor will set their log probs to `inf` so that they are
-    sampled at their corresponding index. Originally created for
-    [Whisper](https://huggingface.co/docs/transformers/model_doc/whisper).
-
-    Examples:
-    ```python
-    >>> from transformers import AutoProcessor, WhisperForConditionalGeneration
-    >>> from datasets import load_dataset
-
-    >>> processor = AutoProcessor.from_pretrained("openai/whisper-tiny.en")
-    >>> model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny.en")
-    >>> ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
-    >>> inputs = processor(ds[0]["audio"]["array"], return_tensors="pt")
-
-    >>> # This Whisper model forces the generation to start with `50362` at the first position by default, i.e.
-    >>> # `"forced_decoder_ids": [[1, 50362]]`. This means all other tokens are masked out.
-    >>> outputs = model.generate(**inputs, return_dict_in_generate=True, output_scores=True)
-    >>> print(
-    ...     all(outputs.scores[0][0, i] == float("-inf") for i in range(processor.tokenizer.vocab_size) if i != 50362)
-    ... )
-    True
-    >>> print(outputs.scores[0][0, 50362])
-    tensor(0.)
-
-    >>> # If we disable `forced_decoder_ids`, we stop seeing that effect
-    >>> outputs = model.generate(**inputs, return_dict_in_generate=True, output_scores=True, forced_decoder_ids=None)
-    >>> print(
-    ...     all(outputs.scores[0][0, i] == float("-inf") for i in range(processor.tokenizer.vocab_size) if i != 50362)
-    ... )
-    False
-    >>> print(outputs.scores[0][0, 50362])
-    tensor(19.3140)
-    ```
-    """
-
-    def __init__(self, force_token_map: List[List[int]]):
-        self.force_token_map = dict(force_token_map)
-
-    @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        generation_idx = input_ids.shape[-1]
-        current_token = self.force_token_map.get(generation_idx, None)
-        if current_token is not None:
-            scores[:, :] = -float("inf")
-            scores[:, current_token] = 0
+        vocab_tensor = torch.arange(scores.shape[-1], device=scores.device)
+        suppress_token_mask = isin_mps_friendly(vocab_tensor, self.suppress_tokens)
+        scores = torch.where(suppress_token_mask, -float("inf"), scores)
         return scores
 
 

@@ -505,16 +505,101 @@ class LlamaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
 class LlamaIntegrationTest(unittest.TestCase):
     @unittest.skip("Logits are not exactly the same, once we fix the instabalities somehow, will update!")
     @slow
+    @require_read_token
+    def test_llama_3_1_hard(self):
+        """
+        An integration test for llama 3.1. It tests against a long output to ensure the subtle numerical differences
+        from llama 3.1.'s RoPE can be detected
+        """
+        # diff on `EXPECTED_TEXT`:
+        # 2024-08-26: updating from torch 2.3.1 to 2.4.0 slightly changes the results.
+        EXPECTED_TEXT = (
+            "Tell me about the french revolution. The french revolution was a period of radical political and social "
+            "upheaval in France that lasted from 1789 until 1799. It was a time of great change and upheaval, marked "
+            "by the overthrow of the monarchy, the rise of the middle class, and the eventual establishment of the "
+            "First French Republic.\nThe revolution began in 1789 with the Estates-General, a representative "
+            "assembly that had not met since 1614. The Third Estate, which represented the common people, "
+            "demanded greater representation and eventually broke away to form the National Assembly. This marked "
+            "the beginning of the end of the absolute monarchy and the rise of the middle class.\n"
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B-Instruct")
+        model = LlamaForCausalLM.from_pretrained(
+            "meta-llama/Meta-Llama-3.1-8B-Instruct", device_map="auto", torch_dtype=torch.bfloat16
+        )
+        input_text = ["Tell me about the french revolution."]
+        model_inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+
+        generated_ids = model.generate(**model_inputs, max_new_tokens=128, do_sample=False)
+        generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+        self.assertEqual(generated_text, EXPECTED_TEXT)
+
+    @slow
+    @require_read_token
+    def test_model_7b_logits_bf16(self):
+        input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
+
+        model = LlamaForCausalLM.from_pretrained(
+            "meta-llama/Llama-2-7b-hf", device_map="auto", torch_dtype=torch.bfloat16, attn_implementation="eager"
+        )
+
+        with torch.no_grad():
+            out = model(torch.tensor([input_ids]).to(torch_device))
+        # Expected mean on dim = -1
+
+        # fmt: off
+        EXPECTED_MEAN = {
+            7: torch.tensor([[-6.5061, -4.1147, -4.9669, -3.2038, 0.8069, -2.9694, 1.2864, -3.3786]]),
+            8: torch.tensor([[-6.5208, -4.1218, -4.9377, -3.2536,  0.8127, -2.9811,  1.2918, -3.3848]])
+        }
+
+        self.assertTrue(torch.allclose(EXPECTED_MEAN[self.cuda_compute_capability_major_version].to(torch_device), out.logits.mean(-1), atol=1e-2, rtol=1e-2))
+
+        # slicing logits[0, 0, 0:15]
+        EXPECTED_SLICE = {
+            7: torch.tensor([[-12.5000, -7.0625, -0.6289, -7.8750, -6.9688, -7.8125, -6.4688, -7.4375, -7.6875, -6.9375, -6.0312, -7.0000, -1.8594, 1.8438, -8.5000]]),
+            8: torch.tensor([[-12.5625,  -7.1250,  -0.6289,  -7.8750,  -6.9688,  -7.8125,  -6.5000, -7.4375,  -7.6562,  -6.9688,  -6.0312,  -7.0312,  -1.8203,   1.8750, -8.5000]])
+        }
+        # fmt: on
+
+        self.assertTrue(
+            torch.allclose(
+                EXPECTED_SLICE[self.cuda_compute_capability_major_version].to(torch_device),
+                out.logits[0, 0, :15],
+                atol=1e-2,
+                rtol=1e-2,
+            )
+        )
+
+    @slow
+    @require_read_token
     def test_model_7b_logits(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
         model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf", device_map="auto")
         out = model(torch.tensor([input_ids]))
         # Expected mean on dim = -1
-        EXPECTED_MEAN = torch.tensor([[-6.6550, -4.1227, -4.9859, -3.2406, 0.8262, -3.0033, 1.2964, -3.3699]])
-        torch.testing.assert_close(out.mean(-1), EXPECTED_MEAN, atol=1e-2, rtol=1e-2)
-        # slicing logits[0, 0, 0:30]
-        EXPECTED_SLICE = torch.tensor([-12.8281, -7.4453, -0.4639, -8.0625, -7.2500, -8.0000, -6.4883, -7.7695, -7.8438, -7.0312, -6.2188, -7.1328, -1.8496, 1.9961, -8.6250, -6.7227, -12.8281, -6.9492, -7.0742, -7.7852, -7.5820, -7.9062, -6.9375, -7.9805, -8.3438, -8.1562, -8.0469, -7.6250, -7.7422, -7.3398,])  # fmt: skip
-        torch.testing.assert_close(out[0, 0, :30], EXPECTED_SLICE, atol=1e-5, rtol=1e-5)
+        EXPECTED_MEAN = {
+            7: torch.tensor([[-6.6420, -4.1227, -4.9809, -3.2041, 0.8261, -3.0052, 1.2957, -3.3648]]),
+            8: torch.tensor([[-6.6544, -4.1259, -4.9840, -3.2456,  0.8261, -3.0124,  1.2971, -3.3641]])
+        }
+
+        self.assertTrue(torch.allclose(EXPECTED_MEAN[self.cuda_compute_capability_major_version].to(torch_device), out.logits.mean(-1), atol=1e-2, rtol=1e-2))
+
+        # slicing logits[0, 0, 0:15]
+        EXPECTED_SLICE = {
+            7: torch.tensor([-12.8125, -7.3359, -0.4846, -8.0234, -7.2383, -7.9922, -6.4805, -7.7344, -7.8125, -7.0078, -6.1797, -7.1094, -1.8633, 1.9736, -8.6016]),
+            8: torch.tensor([-12.8281,  -7.4609,  -0.4668,  -8.0703,  -7.2539,  -8.0078,  -6.4961, -7.7734,  -7.8516,  -7.0352,  -6.2188,  -7.1367,  -1.8564,   1.9922, -8.6328])
+        }
+        # fmt: on
+
+        self.assertTrue(
+            torch.allclose(
+                EXPECTED_SLICE[self.cuda_compute_capability_major_version].to(torch_device),
+                out.logits[0, 0, :15],
+                atol=1e-2,
+                rtol=1e-2,
+            )
+        )
 
     @unittest.skip("Logits are not exactly the same, once we fix the instabalities somehow, will update!")
     @slow
@@ -650,8 +735,151 @@ end
         generated_ids = model.generate(input_ids.to(torch_device), max_new_tokens=128)
         torch.testing.assert_close(generated_ids, EXPECTED_IDS)
 
-        EXPECTED_INFILLING = [
-            '<s> <PRE> def remove_non_ascii(s: str) -> str:\n    """  <SUF>\n    return result\n <MID>Remove non-ASCII characters from a string.\n\n    Args:\n        s: The string to remove non-ASCII characters from.\n\n    Returns:\n        The string with non-ASCII characters removed.\n    """\n    result = ""\n    for c in s:\n        if ord(c) < 128:\n            result += c <EOT></s>'
+        # Dynamic Cache
+        generated_ids = model.generate(**inputs, max_new_tokens=NUM_TOKENS_TO_GENERATE, do_sample=False)
+        dynamic_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        self.assertEqual(EXPECTED_TEXT_COMPLETION, dynamic_text)
+
+        # Static Cache
+        generated_ids = model.generate(
+            **inputs, max_new_tokens=NUM_TOKENS_TO_GENERATE, do_sample=False, cache_implementation="static"
+        )
+        static_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        self.assertEqual(EXPECTED_TEXT_COMPLETION, static_text)
+
+        # Static Cache + compile
+        model._cache = None  # clear cache object, initialized when we pass `cache_implementation="static"`
+        model.forward = torch.compile(model.forward, mode="reduce-overhead", fullgraph=True)
+        generated_ids = model.generate(
+            **inputs, max_new_tokens=NUM_TOKENS_TO_GENERATE, do_sample=False, cache_implementation="static"
+        )
+        static_compiled_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        self.assertEqual(EXPECTED_TEXT_COMPLETION, static_compiled_text)
+
+
+@slow
+@require_torch_gpu
+class Mask4DTestHard(unittest.TestCase):
+    def tearDown(self):
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def setUp(self):
+        model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        self.model_dtype = torch.float32
+        self.tokenizer = LlamaTokenizer.from_pretrained(model_name)
+        self.model = LlamaForCausalLM.from_pretrained(model_name, torch_dtype=self.model_dtype).to(torch_device)
+
+    def get_test_data(self):
+        template = "my favorite {}"
+        items = ("pet is a", "artist plays a", "name is L")  # same number of tokens in each item
+
+        batch_separate = [template.format(x) for x in items]  # 3 separate lines
+        batch_shared_prefix = template.format(" ".join(items))  # 1 line with options concatenated
+
+        input_ids = self.tokenizer(batch_separate, return_tensors="pt").input_ids.to(torch_device)
+        input_ids_shared_prefix = self.tokenizer(batch_shared_prefix, return_tensors="pt").input_ids.to(torch_device)
+
+        mask_shared_prefix = torch.tensor(
+            [
+                [
+                    [
+                        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+                        [1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+                        [1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+                        [1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+                        [1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0],
+                        [1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+                        [1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0],
+                        [1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1],
+                    ]
+                ]
+            ],
+            device=torch_device,
+        )
+
+        position_ids = torch.arange(input_ids.shape[1]).tile(input_ids.shape[0], 1).to(torch_device)
+
+        # building custom positions ids based on custom mask
+        position_ids_shared_prefix = (mask_shared_prefix.sum(dim=-1) - 1).reshape(1, -1)
+        # effectively: position_ids_shared_prefix = torch.tensor([[0, 1, 2, 3, 4, 5, 3, 4, 5, 3, 4, 5]]).to(device)
+
+        # inverting the mask
+        min_dtype = torch.finfo(self.model_dtype).min
+        mask_shared_prefix = (mask_shared_prefix.eq(0.0)).to(dtype=self.model_dtype) * min_dtype
+
+        return input_ids, position_ids, input_ids_shared_prefix, mask_shared_prefix, position_ids_shared_prefix
+
+    def test_stacked_causal_mask(self):
+        (
+            input_ids,
+            position_ids,
+            input_ids_shared_prefix,
+            mask_shared_prefix,
+            position_ids_shared_prefix,
+        ) = self.get_test_data()
+
+        # regular batch
+        logits = self.model.forward(input_ids, position_ids=position_ids).logits
+        logits_last = logits[:, -1, :]  # last tokens in each batch line
+        decoded = [self.tokenizer.decode(t) for t in logits_last.argmax(dim=-1)]
+
+        # single forward run with 4D custom mask
+        logits_shared_prefix = self.model.forward(
+            input_ids_shared_prefix, attention_mask=mask_shared_prefix, position_ids=position_ids_shared_prefix
+        ).logits
+        logits_shared_prefix_last = logits_shared_prefix[
+            0, torch.where(position_ids_shared_prefix == position_ids_shared_prefix.max())[1], :
+        ]  # last three tokens
+        decoded_shared_prefix = [self.tokenizer.decode(t) for t in logits_shared_prefix_last.argmax(dim=-1)]
+
+        self.assertEqual(decoded, decoded_shared_prefix)
+
+    def test_partial_stacked_causal_mask(self):
+        # Same as the test above, but the input is passed in two groups. It tests that we can pass partial 4D attention masks
+
+        (
+            input_ids,
+            position_ids,
+            input_ids_shared_prefix,
+            mask_shared_prefix,
+            position_ids_shared_prefix,
+        ) = self.get_test_data()
+
+        # regular batch
+        logits = self.model.forward(input_ids, position_ids=position_ids).logits
+        logits_last = logits[:, -1, :]  # last tokens in each batch line
+        decoded = [self.tokenizer.decode(t) for t in logits_last.argmax(dim=-1)]
+
+        # 2 forward runs with custom 4D masks
+        part_a = 3  # split point
+
+        input_1a = input_ids_shared_prefix[:, :part_a]
+        position_ids_1a = position_ids_shared_prefix[:, :part_a]
+        mask_1a = mask_shared_prefix[:, :, :part_a, :part_a]
+
+        outs_1a = self.model.forward(input_1a, attention_mask=mask_1a, position_ids=position_ids_1a)
+        past_key_values_a = outs_1a["past_key_values"]
+
+        # Case 1: we pass a 4D attention mask regarding the current sequence length (i.e. [..., seq_len, full_len])
+        input_1b = input_ids_shared_prefix[:, part_a:]
+        position_ids_1b = position_ids_shared_prefix[:, part_a:]
+        mask_1b = mask_shared_prefix[:, :, part_a:, :]
+        outs_1b = self.model.forward(
+            input_1b,
+            attention_mask=mask_1b,
+            position_ids=position_ids_1b,
+            past_key_values=past_key_values_a,
+        )
+        decoded_1b = [
+            self.tokenizer.decode(t)
+            for t in outs_1b.logits.argmax(-1)[
+                0, torch.where(position_ids_shared_prefix == position_ids_shared_prefix.max())[1] - part_a
+            ]
         ]
         infilling = tokenizer.batch_decode(generated_ids)
         self.assertEqual(infilling, EXPECTED_INFILLING)

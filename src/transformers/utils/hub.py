@@ -356,7 +356,7 @@ def cached_file(
     if os.path.isdir(path_or_repo_id):
         resolved_file = os.path.join(os.path.join(path_or_repo_id, subfolder), filename)
         if not os.path.isfile(resolved_file):
-            if _raise_exceptions_for_missing_entries:
+            if _raise_exceptions_for_missing_entries and filename not in ["config.json", f"{subfolder}/config.json"]:
                 raise EnvironmentError(
                     f"{path_or_repo_id} does not appear to have a file named {full_filename}. Checkout "
                     f"'https://huggingface.co/{path_or_repo_id}/{revision}' for available files."
@@ -437,6 +437,8 @@ def cached_file(
             return None
         if revision is None:
             revision = "main"
+        if filename in ["config.json", f"{subfolder}/config.json"]:
+            return None
         raise EnvironmentError(
             f"{path_or_repo_id} does not appear to have a file named {full_filename}. Checkout "
             f"'https://huggingface.co/{path_or_repo_id}/{revision}' for available files."
@@ -617,7 +619,25 @@ def has_file(
 
     r = requests.head(url, headers=headers, allow_redirects=False, proxies=proxies, timeout=10)
     try:
-        hf_raise_for_status(r)
+        response = get_session().head(
+            hf_hub_url(path_or_repo, filename=filename, revision=revision, repo_type=repo_type),
+            headers=build_hf_headers(token=token, user_agent=http_user_agent()),
+            allow_redirects=False,
+            proxies=proxies,
+            timeout=10,
+        )
+    except (requests.exceptions.SSLError, requests.exceptions.ProxyError):
+        # Actually raise for those subclasses of ConnectionError
+        raise
+    except (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        OfflineModeIsEnabled,
+    ):
+        return has_file_in_cache
+
+    try:
+        hf_raise_for_status(response)
         return True
     except GatedRepoError as e:
         logger.error(e)
@@ -1085,6 +1105,46 @@ def extract_info_from_url(url):
     repo, revision, filename = search.groups()
     cache_repo = "--".join(["models"] + repo.split("/"))
     return {"repo": cache_repo, "revision": revision, "filename": filename}
+
+
+def create_and_tag_model_card(
+    repo_id: str,
+    tags: Optional[List[str]] = None,
+    token: Optional[str] = None,
+    ignore_metadata_errors: bool = False,
+):
+    """
+    Creates or loads an existing model card and tags it.
+
+    Args:
+        repo_id (`str`):
+            The repo_id where to look for the model card.
+        tags (`List[str]`, *optional*):
+            The list of tags to add in the model card
+        token (`str`, *optional*):
+            Authentication token, obtained with `huggingface_hub.HfApi.login` method. Will default to the stored token.
+        ignore_metadata_errors (`str`):
+            If True, errors while parsing the metadata section will be ignored. Some information might be lost during
+            the process. Use it at your own risk.
+    """
+    try:
+        # Check if the model card is present on the remote repo
+        model_card = ModelCard.load(repo_id, token=token, ignore_metadata_errors=ignore_metadata_errors)
+    except EntryNotFoundError:
+        # Otherwise create a simple model card from template
+        model_description = "This is the model card of a 🤗 transformers model that has been pushed on the Hub. This model card has been automatically generated."
+        card_data = ModelCardData(tags=[] if tags is None else tags, library_name="transformers")
+        model_card = ModelCard.from_template(card_data, model_description=model_description)
+
+    if tags is not None:
+        # Ensure model_card.data.tags is a list and not None
+        if model_card.data.tags is None:
+            model_card.data.tags = []
+        for model_tag in tags:
+            if model_tag not in model_card.data.tags:
+                model_card.data.tags.append(model_tag)
+
+    return model_card
 
 
 def clean_files_for(file):

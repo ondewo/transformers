@@ -99,6 +99,7 @@ _deps = [
     "accelerate>=0.21.0",
     "av==9.2.0",  # Latest version of PyAV (10.0.0) has issues with audio stream.
     "beautifulsoup4",
+    "blobfile",
     "codecarbon==1.2.0",
     "cookiecutter==1.7.3",
     "dataclasses",
@@ -129,13 +130,14 @@ _deps = [
     "keras<2.16",
     "keras-nlp>=0.3.1",
     "librosa",
-    "nltk",
-    "natten>=0.14.6",
+    "nltk<=3.8.1",
+    "natten>=0.14.6,<0.15.0",
     "numpy>=1.17",
     "onnxconverter-common",
     "onnxruntime-tools>=1.4.2",
     "onnxruntime>=1.4.0",
     "opencv-python",
+    "optimum-benchmark>=0.3.0",
     "optuna",
     "optax>=0.0.8,<=0.1.4",
     "packaging>=20.0",
@@ -160,6 +162,7 @@ _deps = [
     "sacremoses",
     "safetensors>=0.3.1",
     "sagemaker>=2.31.0",
+    "schedulefree>=1.2.6",
     "scikit-learn",
     "sentencepiece>=0.1.91,!=0.1.92",
     "sigopt",
@@ -173,9 +176,10 @@ _deps = [
     "tensorflow-text<2.16",
     "tf2onnx",
     "timeout-decorator",
-    "timm",
-    "tokenizers>=0.14,<0.19",
-    "torch>=1.10,!=1.12.0",
+    "tiktoken",
+    "timm<=0.9.16",
+    "tokenizers>=0.19,<0.20",
+    "torch",
     "torchaudio",
     "torchvision",
     "pyctcdecode>=0.4.0",
@@ -298,6 +302,7 @@ extras["codecarbon"] = deps_list("codecarbon")
 extras["video"] = deps_list("decord", "av")
 
 extras["sentencepiece"] = deps_list("sentencepiece", "protobuf")
+extras["tiktoken"] = deps_list("tiktoken", "blobfile")
 extras["testing"] = (
     deps_list(
         "pytest",

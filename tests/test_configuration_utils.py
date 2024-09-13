@@ -223,12 +223,10 @@ class ConfigTestUtils(unittest.TestCase):
         self.assertEqual(config.text_config.__class__.__name__, "CLIPTextConfig")
 
     def test_from_pretrained_subfolder(self):
-        with self.assertRaises(OSError):
-            # config is in subfolder, the following should not work without specifying the subfolder
-            _ = BertConfig.from_pretrained("hf-internal-testing/tiny-random-bert-subfolder")
+        config = BertConfig.from_pretrained("hf-internal-testing/tiny-random-bert-subfolder")
+        self.assertIsNotNone(config)
 
         config = BertConfig.from_pretrained("hf-internal-testing/tiny-random-bert-subfolder", subfolder="bert")
-
         self.assertIsNotNone(config)
 
     def test_cached_files_are_used_when_internet_is_down(self):
@@ -296,3 +294,24 @@ class ConfigTestUtils(unittest.TestCase):
         old_transformers.configuration_utils.__version__ = "v3.0.0"
         old_configuration = old_transformers.models.auto.AutoConfig.from_pretrained(repo)
         self.assertEqual(old_configuration.hidden_size, 768)
+
+    def test_saving_config_with_custom_generation_kwargs_raises_exception(self):
+        config = BertConfig(min_length=3)  # `min_length = 3` is a non-default generation kwarg
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(ValueError):
+                config.save_pretrained(tmp_dir)
+
+    def test_get_non_default_generation_parameters(self):
+        config = BertConfig()
+        self.assertFalse(len(config._get_non_default_generation_parameters()) > 0)
+        config = BertConfig(min_length=3)
+        self.assertTrue(len(config._get_non_default_generation_parameters()) > 0)
+        config = BertConfig(min_length=0)  # `min_length = 0` is a default generation kwarg
+        self.assertFalse(len(config._get_non_default_generation_parameters()) > 0)
+
+    def test_loading_config_do_not_raise_future_warnings(self):
+        """Regression test for https://github.com/huggingface/transformers/issues/31002."""
+        # Loading config should not raise a FutureWarning. It was the case before.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            PretrainedConfig.from_pretrained("bert-base-uncased")

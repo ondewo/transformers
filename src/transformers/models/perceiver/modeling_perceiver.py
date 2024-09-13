@@ -37,6 +37,7 @@ from ...utils import (
     add_start_docstrings_to_model_forward,
     logging,
     replace_return_docstrings,
+    torch_int,
 )
 from .configuration_perceiver import PerceiverConfig
 
@@ -2754,8 +2755,35 @@ class PerceiverTrainablePositionEncoding(PerceiverAbstractPositionEncoding):
     def output_size(self, *args, **kwargs) -> int:
         return self._num_channels
 
-    def forward(self, batch_size: int) -> torch.Tensor:
+    def interpolate_pos_encoding(self, position_embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        num_positions = position_embeddings.shape[0]
+        new_height = new_width = torch_int(num_positions**0.5)
+
+        # always interpolate when tracing to ensure the exported model works for dynamic input shapes
+        if not torch.jit.is_tracing() and height == new_height and width == new_width:
+            return position_embeddings
+
+        position_embeddings = position_embeddings.reshape(1, new_height, new_width, self._num_channels).permute(
+            0, 3, 1, 2
+        )
+
+        position_embeddings = nn.functional.interpolate(
+            position_embeddings,
+            size=(new_height, new_width),
+            mode="bicubic",
+            align_corners=False,
+        )
+        position_embeddings = position_embeddings.reshape(1, self._num_channels, -1).permute(0, 2, 1).squeeze(0)
+        return position_embeddings
+
+    def forward(
+        self, batch_size: int, interpolate_pos_encoding: bool = False, input_size: torch.Size = None
+    ) -> torch.Tensor:
         position_embeddings = self.position_embeddings
+
+        if interpolate_pos_encoding:
+            height, width = input_size
+            position_embeddings = self.interpolate_pos_encoding(position_embeddings, height, width)
 
         if batch_size is not None:
             position_embeddings = position_embeddings.expand(batch_size, -1, -1)

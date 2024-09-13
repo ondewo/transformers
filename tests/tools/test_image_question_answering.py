@@ -28,7 +28,7 @@ if is_vision_available():
 
 class ImageQuestionAnsweringToolTester(unittest.TestCase, ToolTesterMixin):
     def setUp(self):
-        self.tool = load_tool("image-question-answering")
+        self.tool = load_tool("image_question_answering")
         self.tool.setup()
         self.remote_tool = load_tool("image-question-answering", remote=True)
 

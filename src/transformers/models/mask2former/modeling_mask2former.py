@@ -35,7 +35,10 @@ from ...file_utils import (
 )
 from ...modeling_outputs import BaseModelOutput, BaseModelOutputWithCrossAttentions
 from ...modeling_utils import PreTrainedModel
-from ...utils import logging
+from ...pytorch_utils import is_torch_greater_or_equal_than_2_1
+from ...utils import is_accelerate_available, logging
+from ...utils.backbone_utils import load_backbone
+from ...utils.import_utils import is_torchdynamo_compiling
 from .configuration_mask2former import Mask2FormerConfig
 
 
@@ -1993,12 +1996,18 @@ class Mask2FormerMaskPredictor(nn.Module):
     def forward(self, outputs: torch.Tensor, pixel_embeddings: torch.Tensor, attention_mask_target_size: int = None):
         mask_embeddings = self.mask_embedder(outputs.transpose(0, 1))
 
-        # Equivalent to einsum('bqc, bchw -> bqhw') but jit friendly
-        batch_size, num_queries, num_channels = mask_embeddings.shape
-        _, _, height, width = pixel_embeddings.shape
-        outputs_mask = torch.zeros((batch_size, num_queries, height, width), device=mask_embeddings.device)
-        for c in range(num_channels):
-            outputs_mask += mask_embeddings[..., c][..., None, None] * pixel_embeddings[:, None, c]
+        is_tracing = torch.jit.is_tracing() or isinstance(outputs, torch.fx.Proxy) or is_torchdynamo_compiling()
+        # Sum up over the channels
+        if is_tracing and not is_torch_greater_or_equal_than_2_1:
+            # Equivalent to einsum('bqc, bchw -> bqhw') but jit friendly
+            batch_size, num_queries, num_channels = mask_embeddings.shape
+            _, _, height, width = pixel_embeddings.shape
+            outputs_mask = torch.zeros((batch_size, num_queries, height, width), device=mask_embeddings.device)
+            for c in range(num_channels):
+                outputs_mask += mask_embeddings[..., c][..., None, None] * pixel_embeddings[:, None, c]
+
+        else:
+            outputs_mask = torch.einsum("bqc, bchw -> bqhw", mask_embeddings, pixel_embeddings)
 
         attention_mask = nn.functional.interpolate(
             outputs_mask, size=attention_mask_target_size, mode="bilinear", align_corners=False

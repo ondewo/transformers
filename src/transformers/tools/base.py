@@ -597,34 +597,14 @@ def launch_gradio_demo(tool_class: Tool):
     ).launch()
 
 
-# TODO: Migrate to Accelerate for this once `PartialState.default_device` makes its way into a release.
-def get_default_device():
-    logger.warning(
-        "`get_default_device` is deprecated and will be replaced with `accelerate`'s `PartialState().default_device` "
-        "in version 4.38 of 🤗 Transformers. "
-    )
-    if not is_torch_available():
-        raise ImportError("Please install torch in order to use this tool.")
-
-    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
-        return torch.device("mps")
-    elif torch.cuda.is_available():
-        return torch.device("cuda")
-    else:
-        return torch.device("cpu")
-
-
-TASK_MAPPING = {
-    "document-question-answering": "DocumentQuestionAnsweringTool",
-    "image-captioning": "ImageCaptioningTool",
-    "image-question-answering": "ImageQuestionAnsweringTool",
-    "image-segmentation": "ImageSegmentationTool",
-    "speech-to-text": "SpeechToTextTool",
-    "summarization": "TextSummarizationTool",
-    "text-classification": "TextClassificationTool",
-    "text-question-answering": "TextQuestionAnsweringTool",
-    "text-to-speech": "TextToSpeechTool",
+TOOL_MAPPING = {
+    "document_question_answering": "DocumentQuestionAnsweringTool",
+    "image_question_answering": "ImageQuestionAnsweringTool",
+    "speech_to_text": "SpeechToTextTool",
+    "text_to_speech": "TextToSpeechTool",
     "translation": "TranslationTool",
+    "python_interpreter": "PythonInterpreterTool",
+    "web_search": "DuckDuckGoSearchTool",
 }
 
 
@@ -649,15 +629,10 @@ def load_tool(task_or_repo_id, model_repo_id=None, remote=False, token=None, **k
             The task for which to load the tool or a repo ID of a tool on the Hub. Tasks implemented in Transformers
             are:
 
-            - `"document-question-answering"`
-            - `"image-captioning"`
-            - `"image-question-answering"`
-            - `"image-segmentation"`
-            - `"speech-to-text"`
-            - `"summarization"`
-            - `"text-classification"`
-            - `"text-question-answering"`
-            - `"text-to-speech"`
+            - `"document_question_answering"`
+            - `"image_question_answering"`
+            - `"speech_to_text"`
+            - `"text_to_speech"`
             - `"translation"`
 
         model_repo_id (`str`, *optional*):
@@ -672,8 +647,8 @@ def load_tool(task_or_repo_id, model_repo_id=None, remote=False, token=None, **k
             `cache_dir`, `revision`, `subfolder`) will be used when downloading the files for your tool, and the others
             will be passed along to its init.
     """
-    if task_or_repo_id in TASK_MAPPING:
-        tool_class_name = TASK_MAPPING[task_or_repo_id]
+    if task_or_repo_id in TOOL_MAPPING:
+        tool_class_name = TOOL_MAPPING[task_or_repo_id]
         main_module = importlib.import_module("transformers")
         tools_module = main_module.tools
         tool_class = getattr(tools_module, tool_class_name)

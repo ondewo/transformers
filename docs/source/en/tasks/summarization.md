@@ -210,7 +210,7 @@ At this point, only three steps remain:
 ...     save_total_limit=3,
 ...     num_train_epochs=4,
 ...     predict_with_generate=True,
-...     fp16=True,
+...     fp16=True, #change to bf16=True for XPU
 ...     push_to_hub=True,
 ... )
 
@@ -341,7 +341,7 @@ The simplest way to try out your finetuned model for inference is to use it in a
 ```py
 >>> from transformers import pipeline
 
->>> summarizer = pipeline("summarization", model="stevhliu/my_awesome_billsum_model")
+>>> summarizer = pipeline("summarization", model="username/my_awesome_billsum_model")
 >>> summarizer(text)
 [{"summary_text": "The Inflation Reduction Act lowers prescription drug costs, health care costs, and energy costs. It's the most aggressive action on tackling the climate crisis in American history, which will lift up American workers and create good-paying, union jobs across the country."}]
 ```
@@ -356,7 +356,7 @@ Tokenize the text and return the `input_ids` as PyTorch tensors:
 ```py
 >>> from transformers import AutoTokenizer
 
->>> tokenizer = AutoTokenizer.from_pretrained("stevhliu/my_awesome_billsum_model")
+>>> tokenizer = AutoTokenizer.from_pretrained("username/my_awesome_billsum_model")
 >>> inputs = tokenizer(text, return_tensors="pt").input_ids
 ```
 
@@ -365,7 +365,7 @@ Use the [`~transformers.generation_utils.GenerationMixin.generate`] method to cr
 ```py
 >>> from transformers import AutoModelForSeq2SeqLM
 
->>> model = AutoModelForSeq2SeqLM.from_pretrained("stevhliu/my_awesome_billsum_model")
+>>> model = AutoModelForSeq2SeqLM.from_pretrained("username/my_awesome_billsum_model")
 >>> outputs = model.generate(inputs, max_new_tokens=100, do_sample=False)
 ```
 
@@ -382,7 +382,7 @@ Tokenize the text and return the `input_ids` as TensorFlow tensors:
 ```py
 >>> from transformers import AutoTokenizer
 
->>> tokenizer = AutoTokenizer.from_pretrained("stevhliu/my_awesome_billsum_model")
+>>> tokenizer = AutoTokenizer.from_pretrained("username/my_awesome_billsum_model")
 >>> inputs = tokenizer(text, return_tensors="tf").input_ids
 ```
 
@@ -391,7 +391,7 @@ Use the [`~transformers.generation_tf_utils.TFGenerationMixin.generate`] method 
 ```py
 >>> from transformers import TFAutoModelForSeq2SeqLM
 
->>> model = TFAutoModelForSeq2SeqLM.from_pretrained("stevhliu/my_awesome_billsum_model")
+>>> model = TFAutoModelForSeq2SeqLM.from_pretrained("username/my_awesome_billsum_model")
 >>> outputs = model.generate(inputs, max_new_tokens=100, do_sample=False)
 ```
 

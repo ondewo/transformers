@@ -41,11 +41,11 @@ if is_torch_available():
         ReformerForMaskedLM,
         ReformerForQuestionAnswering,
         ReformerForSequenceClassification,
-        ReformerLayer,
         ReformerModel,
         ReformerModelWithLMHead,
         ReformerTokenizer,
     )
+    from transformers.models.reformer.modeling_reformer import ReformerLayer
 
 
 class ReformerModelTester:

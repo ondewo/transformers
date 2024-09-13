@@ -13,7 +13,7 @@
 # limitations under the License.
 from typing import TYPE_CHECKING
 
-from ..utils import _LazyModule
+from ..utils import OptionalDependencyNotAvailable, _LazyModule, is_torch_available
 
 
 _import_structure = {
@@ -79,6 +79,17 @@ _import_structure = {
     "peft": ["PeftAdapterMixin"],
 }
 
+try:
+    if not is_torch_available():
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    pass
+else:
+    _import_structure["executorch"] = [
+        "TorchExportableModuleWithStaticCache",
+        "convert_and_export_with_cache",
+    ]
+
 if TYPE_CHECKING:
     from .awq import fuse_awq_modules, replace_with_awq_linear
     from .bitsandbytes import (
@@ -140,6 +151,16 @@ if TYPE_CHECKING:
         run_hp_search_wandb,
     )
     from .peft import PeftAdapterMixin
+    from .quanto import replace_with_quanto_layers
+
+    try:
+        if not is_torch_available():
+            raise OptionalDependencyNotAvailable()
+    except OptionalDependencyNotAvailable:
+        pass
+    else:
+        from .executorch import TorchExportableModuleWithStaticCache, convert_and_export_with_cache
+
 else:
     import sys
 

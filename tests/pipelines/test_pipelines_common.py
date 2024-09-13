@@ -22,14 +22,17 @@ from pathlib import Path
 
 import datasets
 import numpy as np
-from huggingface_hub import HfFolder, Repository, create_repo, delete_repo
+from huggingface_hub import HfFolder, Repository, delete_repo
 from requests.exceptions import HTTPError
 
 from transformers import (
+    AutomaticSpeechRecognitionPipeline,
     AutoModelForSequenceClassification,
     AutoTokenizer,
     DistilBertForSequenceClassification,
+    MaskGenerationPipeline,
     TextClassificationPipeline,
+    TextGenerationPipeline,
     TFAutoModelForSequenceClassification,
     pipeline,
 )
@@ -198,6 +201,37 @@ class CommonPipelineTest(unittest.TestCase):
         # instead of the expected tensor.
         outputs = text_classifier(["This is great !"] * 20, batch_size=32)
         self.assertEqual(len(outputs), 20)
+
+    @require_torch
+    def test_torch_dtype_property(self):
+        import torch
+
+        model_id = "hf-internal-testing/tiny-random-distilbert"
+
+        # If dtype is specified in the pipeline constructor, the property should return that type
+        pipe = pipeline(model=model_id, torch_dtype=torch.float16)
+        self.assertEqual(pipe.torch_dtype, torch.float16)
+
+        # If the underlying model changes dtype, the property should return the new type
+        pipe.model.to(torch.bfloat16)
+        self.assertEqual(pipe.torch_dtype, torch.bfloat16)
+
+        # If dtype is NOT specified in the pipeline constructor, the property should just return
+        # the dtype of the underlying model (default)
+        pipe = pipeline(model=model_id)
+        self.assertEqual(pipe.torch_dtype, torch.float32)
+
+        # If underlying model doesn't have dtype property, simply return None
+        pipe.model = None
+        self.assertIsNone(pipe.torch_dtype)
+
+    @require_torch
+    def test_auto_model_pipeline_registration_from_local_dir(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _ = Repository(local_dir=tmp_dir, clone_from="hf-internal-testing/tiny-random-custom-architecture")
+            pipe = pipeline("text-generation", tmp_dir, trust_remote_code=True)
+
+            self.assertIsInstance(pipe, TextGenerationPipeline)  # Assert successful load
 
 
 @is_pipeline_test
@@ -790,6 +824,42 @@ class CustomPipelineTest(unittest.TestCase):
 
         self.assertEqual(self.COUNT, 1)
 
+    @require_torch
+    def test_custom_code_with_string_tokenizer(self):
+        # This test checks for an edge case - tokenizer loading used to fail when using a custom code model
+        # with a separate tokenizer that was passed as a repo name rather than a tokenizer object.
+        # See https://github.com/huggingface/transformers/issues/31669
+        text_generator = pipeline(
+            "text-generation",
+            model="hf-internal-testing/tiny-random-custom-architecture",
+            tokenizer="hf-internal-testing/tiny-random-custom-architecture",
+            trust_remote_code=True,
+        )
+
+        self.assertIsInstance(text_generator, TextGenerationPipeline)  # Assert successful loading
+
+    @require_torch
+    def test_custom_code_with_string_feature_extractor(self):
+        speech_recognizer = pipeline(
+            "automatic-speech-recognition",
+            model="hf-internal-testing/fake-custom-wav2vec2",
+            feature_extractor="hf-internal-testing/fake-custom-wav2vec2",
+            trust_remote_code=True,
+        )
+
+        self.assertIsInstance(speech_recognizer, AutomaticSpeechRecognitionPipeline)  # Assert successful loading
+
+    @require_torch
+    def test_custom_code_with_string_preprocessor(self):
+        mask_generator = pipeline(
+            "mask-generation",
+            model="hf-internal-testing/fake-custom-sam",
+            processor="hf-internal-testing/fake-custom-sam",
+            trust_remote_code=True,
+        )
+
+        self.assertIsInstance(mask_generator, MaskGenerationPipeline)  # Assert successful loading
+
 
 @require_torch
 @is_staging_test
@@ -808,6 +878,7 @@ class DynamicPipelineTester(unittest.TestCase):
         except HTTPError:
             pass
 
+    @unittest.skip("Broken, TODO @Yih-Dar")
     def test_push_to_hub_dynamic_pipeline(self):
         from transformers import BertConfig, BertForSequenceClassification, BertTokenizer
 

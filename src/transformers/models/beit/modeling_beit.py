@@ -42,6 +42,7 @@ from ...utils import (
     add_start_docstrings_to_model_forward,
     logging,
     replace_return_docstrings,
+    torch_int,
 )
 from ...utils.backbone_utils import BackboneMixin
 from .configuration_beit import BeitConfig
@@ -150,7 +151,54 @@ class BeitEmbeddings(nn.Module):
             self.position_embeddings = None
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, pixel_values: torch.Tensor, bool_masked_pos: Optional[torch.BoolTensor] = None) -> torch.Tensor:
+    # Copied from transformers.models.vit.modeling_vit.ViTEmbeddings.interpolate_pos_encoding
+    def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        """
+        This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher resolution
+        images. This method is also adapted to support torch.jit tracing.
+
+        Adapted from:
+        - https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174-L194, and
+        - https://github.com/facebookresearch/dinov2/blob/e1277af2ba9496fbadf7aec6eba56e8d882d1e35/dinov2/models/vision_transformer.py#L179-L211
+        """
+
+        num_patches = embeddings.shape[1] - 1
+        num_positions = self.position_embeddings.shape[1] - 1
+
+        # always interpolate when tracing to ensure the exported model works for dynamic input shapes
+        if not torch.jit.is_tracing() and num_patches == num_positions and height == width:
+            return self.position_embeddings
+
+        class_pos_embed = self.position_embeddings[:, :1]
+        patch_pos_embed = self.position_embeddings[:, 1:]
+
+        dim = embeddings.shape[-1]
+
+        new_height = height // self.patch_size
+        new_width = width // self.patch_size
+
+        sqrt_num_positions = torch_int(num_positions**0.5)
+        patch_pos_embed = patch_pos_embed.reshape(1, sqrt_num_positions, sqrt_num_positions, dim)
+        patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
+
+        patch_pos_embed = nn.functional.interpolate(
+            patch_pos_embed,
+            size=(new_height, new_width),
+            mode="bicubic",
+            align_corners=False,
+        )
+
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+
+        return torch.cat((class_pos_embed, patch_pos_embed), dim=1)
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        interpolate_pos_encoding: bool = False,
+    ) -> torch.Tensor:
+        _, _, height, width = pixel_values.shape
         embeddings, (patch_height, patch_width) = self.patch_embeddings(
             pixel_values, self.position_embeddings[:, 1:, :] if self.position_embeddings is not None else None
         )
@@ -482,7 +530,44 @@ class BeitRelativePositionBias(nn.Module):
             self.window_size[0] * self.window_size[1] + 1, self.window_size[0] * self.window_size[1] + 1, -1
         )  # Wh*Ww,Wh*Ww,nH
 
-        return relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        old_relative_position_bias_table = self.relative_position_bias_table
+
+        old_num_relative_distance = self.num_relative_distance
+        new_num_relative_distance = new_height * new_width + 3
+
+        old_sub_table = old_relative_position_bias_table[: old_num_relative_distance - 3]
+
+        old_sub_table = old_sub_table.reshape(1, old_width, old_height, -1).permute(0, 3, 1, 2)
+        new_sub_table = nn.functional.interpolate(
+            old_sub_table, size=(torch_int(new_height), torch_int(new_width)), mode="bilinear"
+        )
+        new_sub_table = new_sub_table.permute(0, 2, 3, 1).reshape(new_num_relative_distance - 3, -1)
+
+        new_relative_position_bias_table = torch.cat(
+            [new_sub_table, old_relative_position_bias_table[old_num_relative_distance - 3 :]]
+        )
+
+        key = window_size
+        if key not in self.relative_position_indices.keys():
+            self.relative_position_indices[key] = self.generate_relative_position_index(window_size)
+
+        relative_position_bias = new_relative_position_bias_table[self.relative_position_indices[key].view(-1)]
+        # patch_size*num_patches_height, patch_size*num_patches_width, num_attention_heads
+        relative_position_bias = relative_position_bias.view(
+            window_size[0] * window_size[1] + 1, window_size[0] * window_size[1] + 1, -1
+        )
+        # num_attention_heads, patch_size*num_patches_width, patch_size*num_patches_height
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+
+        if interpolate_pos_encoding:
+            relative_position_bias = nn.functional.interpolate(
+                relative_position_bias.unsqueeze(1),
+                size=(dim_size, dim_size),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
+
+        return relative_position_bias.unsqueeze(0)
 
 
 class BeitEncoder(nn.Module):

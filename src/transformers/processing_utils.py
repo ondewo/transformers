@@ -22,8 +22,32 @@ from pathlib import Path
 from typing import Optional, Union
 
 from .dynamic_module_utils import custom_object_save
-from .tokenization_utils_base import PreTrainedTokenizerBase
-from .utils import PushToHubMixin, copy_func, direct_transformers_import, logging
+from .image_utils import ChannelDimension, is_vision_available, valid_images
+
+
+if is_vision_available():
+    from .image_utils import PILImageResampling
+
+from .tokenization_utils_base import (
+    PaddingStrategy,
+    PreTrainedTokenizerBase,
+    TruncationStrategy,
+)
+from .utils import (
+    CHAT_TEMPLATE_NAME,
+    PROCESSOR_NAME,
+    PushToHubMixin,
+    TensorType,
+    add_model_info_to_auto_map,
+    add_model_info_to_custom_pipelines,
+    cached_file,
+    copy_func,
+    direct_transformers_import,
+    download_url,
+    is_offline_mode,
+    is_remote_url,
+    logging,
+)
 
 
 logger = logging.get_logger(__name__)
@@ -84,6 +108,68 @@ class ProcessorMixin(PushToHubMixin):
                 )
 
             setattr(self, attribute_name, arg)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serializes this instance to a Python dictionary.
+
+        Returns:
+            `Dict[str, Any]`: Dictionary of all the attributes that make up this processor instance.
+        """
+        output = copy.deepcopy(self.__dict__)
+
+        # Get the kwargs in `__init__`.
+        sig = inspect.signature(self.__init__)
+        # Only save the attributes that are presented in the kwargs of `__init__`.
+        attrs_to_save = sig.parameters
+        # Don't save attributes like `tokenizer`, `image processor` etc.
+        attrs_to_save = [x for x in attrs_to_save if x not in self.__class__.attributes]
+        # extra attributes to be kept
+        attrs_to_save += ["auto_map"]
+
+        output = {k: v for k, v in output.items() if k in attrs_to_save}
+
+        output["processor_class"] = self.__class__.__name__
+
+        if "tokenizer" in output:
+            del output["tokenizer"]
+        if "image_processor" in output:
+            del output["image_processor"]
+        if "feature_extractor" in output:
+            del output["feature_extractor"]
+        if "chat_template" in output:
+            del output["chat_template"]
+
+        # Some attributes have different names but containing objects that are not simple strings
+        output = {
+            k: v
+            for k, v in output.items()
+            if not (isinstance(v, PushToHubMixin) or v.__class__.__name__ == "BeamSearchDecoderCTC")
+        }
+
+        return output
+
+    def to_json_string(self) -> str:
+        """
+        Serializes this instance to a JSON string.
+
+        Returns:
+            `str`: String containing all the attributes that make up this feature_extractor instance in JSON format.
+        """
+        dictionary = self.to_dict()
+
+        return json.dumps(dictionary, indent=2, sort_keys=True) + "\n"
+
+    def to_json_file(self, json_file_path: Union[str, os.PathLike]):
+        """
+        Save this instance to a JSON file.
+
+        Args:
+            json_file_path (`str` or `os.PathLike`):
+                Path to the JSON file in which this processor instance's parameters will be saved.
+        """
+        with open(json_file_path, "w", encoding="utf-8") as writer:
+            writer.write(self.to_json_string())
 
     def __repr__(self):
         attributes_repr = [f"- {name}: {repr(getattr(self, name))}" for name in self.attributes]
@@ -164,6 +250,314 @@ class ProcessorMixin(PushToHubMixin):
                 commit_message=commit_message,
                 token=kwargs.get("token"),
             )
+
+        if set(processor_dict.keys()) == {"processor_class"}:
+            return []
+        return [output_processor_file]
+
+    @classmethod
+    def get_processor_dict(
+        cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        From a `pretrained_model_name_or_path`, resolve to a dictionary of parameters, to be used for instantiating a
+        processor of type [`~processing_utils.ProcessingMixin`] using `from_args_and_dict`.
+
+        Parameters:
+            pretrained_model_name_or_path (`str` or `os.PathLike`):
+                The identifier of the pre-trained checkpoint from which we want the dictionary of parameters.
+            subfolder (`str`, *optional*, defaults to `""`):
+                In case the relevant files are located inside a subfolder of the model repo on huggingface.co, you can
+                specify the folder name here.
+
+        Returns:
+            `Tuple[Dict, Dict]`: The dictionary(ies) that will be used to instantiate the processor object.
+        """
+        cache_dir = kwargs.pop("cache_dir", None)
+        force_download = kwargs.pop("force_download", False)
+        resume_download = kwargs.pop("resume_download", None)
+        proxies = kwargs.pop("proxies", None)
+        token = kwargs.pop("token", None)
+        local_files_only = kwargs.pop("local_files_only", False)
+        revision = kwargs.pop("revision", None)
+        subfolder = kwargs.pop("subfolder", "")
+
+        from_pipeline = kwargs.pop("_from_pipeline", None)
+        from_auto_class = kwargs.pop("_from_auto", False)
+
+        user_agent = {"file_type": "processor", "from_auto_class": from_auto_class}
+        if from_pipeline is not None:
+            user_agent["using_pipeline"] = from_pipeline
+
+        if is_offline_mode() and not local_files_only:
+            logger.info("Offline mode: forcing local_files_only=True")
+            local_files_only = True
+
+        pretrained_model_name_or_path = str(pretrained_model_name_or_path)
+        is_local = os.path.isdir(pretrained_model_name_or_path)
+        if os.path.isdir(pretrained_model_name_or_path):
+            processor_file = os.path.join(pretrained_model_name_or_path, PROCESSOR_NAME)
+            chat_template_file = os.path.join(pretrained_model_name_or_path, "chat_template.json")
+
+        if os.path.isfile(pretrained_model_name_or_path):
+            resolved_processor_file = pretrained_model_name_or_path
+            # cant't load chat-template when given a file as pretrained_model_name_or_path
+            resolved_chat_template_file = None
+            is_local = True
+        elif is_remote_url(pretrained_model_name_or_path):
+            processor_file = pretrained_model_name_or_path
+            resolved_processor_file = download_url(pretrained_model_name_or_path)
+            # can't load chat-template when given a file url as pretrained_model_name_or_path
+            resolved_chat_template_file = None
+        else:
+            processor_file = PROCESSOR_NAME
+            chat_template_file = CHAT_TEMPLATE_NAME
+            try:
+                # Load from local folder or from cache or download from model Hub and cache
+                resolved_processor_file = cached_file(
+                    pretrained_model_name_or_path,
+                    processor_file,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    proxies=proxies,
+                    resume_download=resume_download,
+                    local_files_only=local_files_only,
+                    token=token,
+                    user_agent=user_agent,
+                    revision=revision,
+                    subfolder=subfolder,
+                    _raise_exceptions_for_missing_entries=False,
+                )
+
+                # Load chat template from a separate json if exists
+                # because making it part of processor-config break BC.
+                # Processors in older version do not accept any kwargs
+                resolved_chat_template_file = cached_file(
+                    pretrained_model_name_or_path,
+                    chat_template_file,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    proxies=proxies,
+                    resume_download=resume_download,
+                    local_files_only=local_files_only,
+                    token=token,
+                    user_agent=user_agent,
+                    revision=revision,
+                    subfolder=subfolder,
+                    _raise_exceptions_for_missing_entries=False,
+                )
+            except EnvironmentError:
+                # Raise any environment error raise by `cached_file`. It will have a helpful error message adapted to
+                # the original exception.
+                raise
+            except Exception:
+                # For any other exception, we throw a generic error.
+                raise EnvironmentError(
+                    f"Can't load processor for '{pretrained_model_name_or_path}'. If you were trying to load"
+                    " it from 'https://huggingface.co/models', make sure you don't have a local directory with the"
+                    f" same name. Otherwise, make sure '{pretrained_model_name_or_path}' is the correct path to a"
+                    f" directory containing a {PROCESSOR_NAME} file"
+                )
+
+        # Add chat template as kwarg before returning because most models don't have processor config
+        chat_template = None
+        if resolved_chat_template_file is not None:
+            with open(resolved_chat_template_file, "r", encoding="utf-8") as reader:
+                text = reader.read()
+            chat_template = json.loads(text)["chat_template"]
+            kwargs["chat_template"] = chat_template
+
+        # Existing processors on the Hub created before #27761 being merged don't have `processor_config.json` (if not
+        # updated afterward), and we need to keep `from_pretrained` work. So here it fallbacks to the empty dict.
+        # (`cached_file` called using `_raise_exceptions_for_missing_entries=False` to avoid exception)
+        # However, for models added in the future, we won't get the expected error if this file is missing.
+        if resolved_processor_file is None:
+            return {}, kwargs
+
+        try:
+            # Load processor dict
+            with open(resolved_processor_file, "r", encoding="utf-8") as reader:
+                text = reader.read()
+            processor_dict = json.loads(text)
+
+        except json.JSONDecodeError:
+            raise EnvironmentError(
+                f"It looks like the config file at '{resolved_processor_file}' is not a valid JSON file."
+            )
+
+        if is_local:
+            logger.info(f"loading configuration file {resolved_processor_file}")
+        else:
+            logger.info(f"loading configuration file {processor_file} from cache at {resolved_processor_file}")
+
+        if "chat_template" in processor_dict and processor_dict["chat_template"] is not None:
+            logger.warning_once(
+                "Chat templates should be in a 'chat_template.json' file but found key='chat_template' "
+                "in the processor's config. Make sure to move your template to its own file."
+            )
+
+        if not is_local:
+            if "auto_map" in processor_dict:
+                processor_dict["auto_map"] = add_model_info_to_auto_map(
+                    processor_dict["auto_map"], pretrained_model_name_or_path
+                )
+            if "custom_pipelines" in processor_dict:
+                processor_dict["custom_pipelines"] = add_model_info_to_custom_pipelines(
+                    processor_dict["custom_pipelines"], pretrained_model_name_or_path
+                )
+
+        return processor_dict, kwargs
+
+    @classmethod
+    def from_args_and_dict(cls, args, processor_dict: Dict[str, Any], **kwargs):
+        """
+        Instantiates a type of [`~processing_utils.ProcessingMixin`] from a Python dictionary of parameters.
+
+        Args:
+            processor_dict (`Dict[str, Any]`):
+                Dictionary that will be used to instantiate the processor object. Such a dictionary can be
+                retrieved from a pretrained checkpoint by leveraging the
+                [`~processing_utils.ProcessingMixin.to_dict`] method.
+            kwargs (`Dict[str, Any]`):
+                Additional parameters from which to initialize the processor object.
+
+        Returns:
+            [`~processing_utils.ProcessingMixin`]: The processor object instantiated from those
+            parameters.
+        """
+        processor_dict = processor_dict.copy()
+        return_unused_kwargs = kwargs.pop("return_unused_kwargs", False)
+        chat_template = kwargs.pop("chat_template", None)
+
+        # We have to pop up some unused (but specific) kwargs and then validate that it doesn't contain unused kwargs
+        # If we don't pop, some specific kwargs will raise a warning
+        if "processor_class" in processor_dict:
+            del processor_dict["processor_class"]
+
+        if "auto_map" in processor_dict:
+            del processor_dict["auto_map"]
+
+        unused_kwargs = cls.validate_init_kwargs(processor_config=processor_dict, valid_kwargs=cls.valid_kwargs)
+        processor = cls(*args, **processor_dict)
+        if chat_template is not None:
+            setattr(processor, "chat_template", chat_template)
+
+        # Update processor with kwargs if needed
+        for key in set(kwargs.keys()):
+            if hasattr(processor, key):
+                setattr(processor, key, kwargs.pop(key))
+
+        kwargs.update(unused_kwargs)
+        logger.info(f"Processor {processor}")
+        if return_unused_kwargs:
+            return processor, kwargs
+        else:
+            return processor
+
+    def _merge_kwargs(
+        self,
+        ModelProcessorKwargs: ProcessingKwargs,
+        tokenizer_init_kwargs: Optional[Dict] = None,
+        **kwargs,
+    ) -> Dict[str, Dict]:
+        """
+        Method to merge dictionaries of kwargs cleanly separated by modality within a Processor instance.
+        The order of operations is as follows:
+            1) kwargs passed as before have highest priority to preserve BC.
+                ```python
+                high_priority_kwargs = {"crop_size" = {"height": 222, "width": 222}, "padding" = "max_length"}
+                processor(..., **high_priority_kwargs)
+                ```
+            2) kwargs passed as modality-specific kwargs have second priority. This is the recommended API.
+                ```python
+                processor(..., text_kwargs={"padding": "max_length"}, images_kwargs={"crop_size": {"height": 222, "width": 222}}})
+                ```
+            3) kwargs passed during instantiation of a modality processor have fourth priority.
+                ```python
+                tokenizer = tokenizer_class(..., {"padding": "max_length"})
+                image_processor = image_processor_class(...)
+                processor(tokenizer, image_processor) # will pass max_length unless overriden by kwargs at call
+                ```
+            4) defaults kwargs specified at processor level have lowest priority.
+                ```python
+                class MyProcessingKwargs(ProcessingKwargs, CommonKwargs, TextKwargs, ImagesKwargs, total=False):
+                    _defaults = {
+                        "text_kwargs": {
+                            "padding": "max_length",
+                            "max_length": 64,
+                        },
+                    }
+                ```
+        Args:
+            ModelProcessorKwargs (`ProcessingKwargs`):
+                Typed dictionary of kwargs specifically required by the model passed.
+            tokenizer_init_kwargs (`Dict`, *optional*):
+                Dictionary of kwargs the tokenizer was instantiated with and need to take precedence over defaults.
+
+        Returns:
+            output_kwargs (`Dict`):
+                Dictionary of per-modality kwargs to be passed to each modality-specific processor.
+
+        """
+        # Initialize dictionaries
+        output_kwargs = {
+            "text_kwargs": {},
+            "images_kwargs": {},
+            "audio_kwargs": {},
+            "videos_kwargs": {},
+            "common_kwargs": {},
+        }
+
+        default_kwargs = {
+            "text_kwargs": {},
+            "images_kwargs": {},
+            "audio_kwargs": {},
+            "videos_kwargs": {},
+            "common_kwargs": {},
+        }
+
+        # get defaults from set model processor kwargs if they exist
+        for modality in default_kwargs:
+            default_kwargs[modality] = ModelProcessorKwargs._defaults.get(modality, {}).copy()
+            # update defaults with arguments from tokenizer init
+            for modality_key in ModelProcessorKwargs.__annotations__[modality].__annotations__.keys():
+                # init with tokenizer init kwargs if necessary
+                if modality_key in tokenizer_init_kwargs:
+                    default_kwargs[modality][modality_key] = tokenizer_init_kwargs[modality_key]
+        # now defaults kwargs are updated with the tokenizers defaults.
+        # pass defaults to output dictionary
+        output_kwargs.update(default_kwargs)
+
+        # update modality kwargs with passed kwargs
+        non_modality_kwargs = set(kwargs) - set(output_kwargs)
+        for modality in output_kwargs:
+            for modality_key in ModelProcessorKwargs.__annotations__[modality].__annotations__.keys():
+                # check if we received a structured kwarg dict or not to handle it correctly
+                if modality in kwargs:
+                    kwarg_value = kwargs[modality].pop(modality_key, "__empty__")
+                    # check if this key was passed as a flat kwarg.
+                    if kwarg_value != "__empty__" and modality_key in non_modality_kwargs:
+                        raise ValueError(
+                            f"Keyword argument {modality_key} was passed two times: in a dictionary for {modality} and as a **kwarg."
+                        )
+                elif modality_key in kwargs:
+                    kwarg_value = kwargs.pop(modality_key, "__empty__")
+                else:
+                    kwarg_value = "__empty__"
+                if kwarg_value != "__empty__":
+                    output_kwargs[modality][modality_key] = kwarg_value
+        # if something remains in kwargs, it belongs to common after flattening
+        if set(kwargs) & set(default_kwargs):
+            # here kwargs is dictionary-based since it shares keys with default set
+            [output_kwargs["common_kwargs"].update(subdict) for _, subdict in kwargs.items()]
+        else:
+            # here it's a flat dict
+            output_kwargs["common_kwargs"].update(kwargs)
+
+        # all modality-specific kwargs are updated with common kwargs
+        for modality in output_kwargs:
+            output_kwargs[modality].update(output_kwargs["common_kwargs"])
+        return output_kwargs
 
     @classmethod
     def from_pretrained(
@@ -276,6 +670,50 @@ class ProcessorMixin(PushToHubMixin):
     def model_input_names(self):
         first_attribute = getattr(self, self.attributes[0])
         return getattr(first_attribute, "model_input_names", None)
+
+
+def _validate_images_text_input_order(images, text):
+    """
+    For backward compatibility: reverse the order of `images` and `text` inputs if they are swapped.
+    This method should only be called for processors where `images` and `text` have been swapped for uniformization purposes.
+    Note that this method assumes that two `None` inputs are valid inputs. If this is not the case, it should be handled
+    in the processor's `__call__` method before calling this method.
+    """
+
+    def _is_valid_text_input_for_processor(t):
+        if isinstance(t, str):
+            # Strings are fine
+            return True
+        elif isinstance(t, (list, tuple)):
+            # List are fine as long as they are...
+            if len(t) == 0:
+                # ... not empty
+                return False
+            for t_s in t:
+                return _is_valid_text_input_for_processor(t_s)
+        return False
+
+    def _is_valid(input, validator):
+        return validator(input) or input is None
+
+    images_is_valid = _is_valid(images, valid_images)
+    images_is_text = _is_valid_text_input_for_processor(images) if not images_is_valid else False
+
+    text_is_valid = _is_valid(text, _is_valid_text_input_for_processor)
+    text_is_images = valid_images(text) if not text_is_valid else False
+    # Handle cases where both inputs are valid
+    if images_is_valid and text_is_valid:
+        return images, text
+
+    # Handle cases where inputs need to and can be swapped
+    if (images is None and text_is_images) or (text is None and images_is_text) or (images_is_text and text_is_images):
+        logger.warning_once(
+            "You may have used the wrong order for inputs. `images` should be passed before `text`. "
+            "The `images` and `text` inputs will be swapped. This behavior will be deprecated in transformers v4.47."
+        )
+        return text, images
+
+    raise ValueError("Invalid input type. Check that `images` and/or `text` are valid inputs.")
 
 
 ProcessorMixin.push_to_hub = copy_func(ProcessorMixin.push_to_hub)

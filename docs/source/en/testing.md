@@ -1227,6 +1227,8 @@ import numpy as np
 np.random.seed(seed)
 
 # tf RNG
+import tensorflow as tf 
+
 tf.random.set_seed(seed)
 ```
 
