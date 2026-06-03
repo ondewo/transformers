@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -171,10 +170,11 @@ class EsmFoldModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
     all_model_classes = (EsmForProteinFolding,) if is_torch_available() else ()
     pipeline_model_mapping = {} if is_torch_available() else {}
     test_sequence_classification_problem_types = False
+    test_torch_exportable = False
 
     def setUp(self):
         self.model_tester = EsmFoldModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=EsmConfig, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=EsmConfig, hidden_size=48)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -209,26 +209,6 @@ class EsmFoldModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
     def test_inputs_embeds(self):
         pass
 
-    @unittest.skip(reason="ESMFold does not support head pruning.")
-    def test_head_pruning(self):
-        pass
-
-    @unittest.skip(reason="ESMFold does not support head pruning.")
-    def test_head_pruning_integration(self):
-        pass
-
-    @unittest.skip(reason="ESMFold does not support head pruning.")
-    def test_head_pruning_save_load_from_config_init(self):
-        pass
-
-    @unittest.skip(reason="ESMFold does not support head pruning.")
-    def test_head_pruning_save_load_from_pretrained(self):
-        pass
-
-    @unittest.skip(reason="ESMFold does not support head pruning.")
-    def test_headmasking(self):
-        pass
-
     @unittest.skip(reason="ESMFold does not output hidden states in the normal way.")
     def test_hidden_states_output(self):
         pass
@@ -241,31 +221,26 @@ class EsmFoldModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
     def test_model_outputs_equivalence(self):
         pass
 
-    @unittest.skip(reason="This test doesn't work for ESMFold and doesn't test core functionality")
-    def test_save_load_fast_init_from_base(self):
-        pass
-
     @unittest.skip(reason="ESMFold does not support input chunking.")
     def test_feed_forward_chunking(self):
         pass
 
-    @unittest.skip(
-        reason="ESMFold doesn't respect you and it certainly doesn't respect your initialization arguments."
-    )
-    def test_initialization(self):
-        pass
+    def test_reverse_loading_mapping(self):
+        # EsmFold defaults to absolute position embeddings, which means it has no
+        # rotary_embeddings.inv_freq keys. Temporarily switch to rotary so the
+        # inv_freq conversion pattern registered for "esm" has keys to match.
+        original = self.model_tester.get_config
 
-    @unittest.skip(reason="ESMFold doesn't support torchscript compilation.")
-    def test_torchscript_output_attentions(self):
-        pass
+        def _get_config_with_rotary():
+            config = original()
+            config.position_embedding_type = "rotary"
+            return config
 
-    @unittest.skip(reason="ESMFold doesn't support torchscript compilation.")
-    def test_torchscript_output_hidden_state(self):
-        pass
-
-    @unittest.skip(reason="ESMFold doesn't support torchscript compilation.")
-    def test_torchscript_simple(self):
-        pass
+        self.model_tester.get_config = _get_config_with_rotary
+        try:
+            super().test_reverse_loading_mapping()
+        finally:
+            self.model_tester.get_config = original
 
     @unittest.skip(reason="ESMFold doesn't support data parallel.")
     def test_multi_gpu_data_parallel_forward(self):

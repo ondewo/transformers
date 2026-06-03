@@ -13,11 +13,11 @@ specific language governing permissions and limitations under the License.
 rendered properly in your Markdown viewer.
 
 -->
+*This model was released on 2024-07-15 and added to Hugging Face Transformers on 2024-08-08.*
 
 # Qwen2Audio
 
 <div class="flex flex-wrap space-x-1">
-<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
 <img alt="FlashAttention" src="https://img.shields.io/badge/%E2%9A%A1%EF%B8%8E%20FlashAttention-eae0c8?style=flat">
 <img alt="SDPA" src="https://img.shields.io/badge/SDPA-DE3412?style=flat&logo=pytorch&logoColor=white">
 </div>
@@ -29,12 +29,11 @@ The Qwen2-Audio is the new model series of large audio-language models from the 
 * voice chat: users can freely engage in voice interactions with Qwen2-Audio without text input
 * audio analysis: users could provide audio and text instructions for analysis during the interaction
 
-It was proposed in [Qwen2-Audio Technical Report](https://arxiv.org/abs/2407.10759) by Yunfei Chu, Jin Xu, Qian Yang, Haojie Wei, Xipin Wei, Zhifang Guo, Yichong Leng, Yuanjun Lv, Jinzheng He, Junyang Lin, Chang Zhou, Jingren Zhou.
+It was proposed in [Qwen2-Audio Technical Report](https://huggingface.co/papers/2407.10759) by Yunfei Chu, Jin Xu, Qian Yang, Haojie Wei, Xipin Wei, Zhifang Guo, Yichong Leng, Yuanjun Lv, Jinzheng He, Junyang Lin, Chang Zhou, Jingren Zhou.
 
 The abstract from the paper is the following:
 
-*We introduce the latest progress of Qwen-Audio, a large-scale audio-language model called Qwen2-Audio, which is capable of accepting various audio signal inputs and performing audio analysis or direct textual responses with regard to speech instructions. In contrast to complex hierarchical tags, we have simplified the pre-training process by utilizing natural language prompts for different data and tasks, and have further expanded the data volume. We have boosted the instruction-following capability of Qwen2-Audio and implemented two distinct audio interaction modes for voice chat and audio analysis. In the voice chat mode, users can freely engage in voice interactions with Qwen2-Audio without text input. In the audio analysis mode, users could provide audio and text instructions for analysis during the interaction. Note that we do not use any system prompts to switch between voice chat and audio analysis modes. Qwen2-Audio is capable of intelligently comprehending the content within audio and following voice commands to respond appropriately. For instance, in an audio segment that simultaneously contains sounds, multi-speaker conversations, and a voice command, Qwen2-Audio can directly understand the command and provide an interpretation and response to the audio. Additionally, DPO has optimized the model's performance in terms of factuality and adherence to desired behavior. According to the evaluation results from AIR-Bench, Qwen2-Audio outperformed previous SOTAs, such as Gemini-1.5-pro, in tests focused on audio-centric instruction-following capabilities. Qwen2-Audio is open-sourced with the aim of fostering the advancement of the multi-modal language community. *
-
+*We introduce the latest progress of Qwen-Audio, a large-scale audio-language model called Qwen2-Audio, which is capable of accepting various audio signal inputs and performing audio analysis or direct textual responses with regard to speech instructions. In contrast to complex hierarchical tags, we have simplified the pre-training process by utilizing natural language prompts for different data and tasks, and have further expanded the data volume. We have boosted the instruction-following capability of Qwen2-Audio and implemented two distinct audio interaction modes for voice chat and audio analysis. In the voice chat mode, users can freely engage in voice interactions with Qwen2-Audio without text input. In the audio analysis mode, users could provide audio and text instructions for analysis during the interaction. Note that we do not use any system prompts to switch between voice chat and audio analysis modes. Qwen2-Audio is capable of intelligently comprehending the content within audio and following voice commands to respond appropriately. For instance, in an audio segment that simultaneously contains sounds, multi-speaker conversations, and a voice command, Qwen2-Audio can directly understand the command and provide an interpretation and response to the audio. Additionally, DPO has optimized the model's performance in terms of factuality and adherence to desired behavior. According to the evaluation results from AIR-Bench, Qwen2-Audio outperformed previous SOTAs, such as Gemini-1.5-pro, in tests focused on audio-centric instruction-following capabilities. Qwen2-Audio is open-sourced with the aim of fostering the advancement of the multi-modal language community.*
 
 ## Usage tips
 
@@ -45,8 +44,11 @@ The abstract from the paper is the following:
 ```python
 from io import BytesIO
 from urllib.request import urlopen
+
 import librosa
+
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+
 
 model = Qwen2AudioForConditionalGeneration.from_pretrained("Qwen/Qwen2-Audio-7B", trust_remote_code=True, device_map="auto")
 processor = AutoProcessor.from_pretrained("Qwen/Qwen2-Audio-7B", trust_remote_code=True)
@@ -54,7 +56,7 @@ processor = AutoProcessor.from_pretrained("Qwen/Qwen2-Audio-7B", trust_remote_co
 prompt = "<|audio_bos|><|AUDIO|><|audio_eos|>Generate the caption in English:"
 url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-Audio/glass-breaking-151256.mp3"
 audio, sr = librosa.load(BytesIO(urlopen(url).read()), sr=processor.feature_extractor.sampling_rate)
-inputs = processor(text=prompt, audios=audio, return_tensors="pt").to(model.device)
+inputs = processor(text=prompt, audio=audio, return_tensors="pt").to(model.device)
 
 generate_ids = model.generate(**inputs, max_length=256)
 generate_ids = generate_ids[:, inputs.input_ids.size(1):]
@@ -63,7 +65,7 @@ response = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_
 
 # We can also omit the audio_bos and audio_eos tokens
 prompt = "<|AUDIO|>Generate the caption in English:"
-inputs = processor(text=prompt, audios=audio, return_tensors="pt").to(model.device)
+inputs = processor(text=prompt, audio=audio, return_tensors="pt").to(model.device)
 
 generate_ids = model.generate(**inputs, max_length=256)
 generate_ids = generate_ids[:, inputs.input_ids.size(1):]
@@ -74,12 +76,17 @@ response = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_
 In the following, we demonstrate how to use `Qwen2-Audio-7B-Instruct` for the inference, supporting both voice chat and audio analysis modes. Note that we have used the ChatML format for dialog, in this demo we show how to leverage `apply_chat_template` for this purpose.
 
 ### Voice Chat Inference
+
 In the voice chat mode, users can freely engage in voice interactions with Qwen2-Audio without text input:
+
 ```python
 from io import BytesIO
 from urllib.request import urlopen
+
 import librosa
-from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
+
+from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+
 
 processor = AutoProcessor.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct")
 model = Qwen2AudioForConditionalGeneration.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct", device_map="auto")
@@ -104,8 +111,8 @@ for message in conversation:
                     sr=processor.feature_extractor.sampling_rate)[0]
                 )
 
-inputs = processor(text=text, audios=audios, return_tensors="pt", padding=True)
-inputs.input_ids = inputs.input_ids.to("cuda")
+inputs = processor(text=text, audio=audios, return_tensors="pt", padding=True).to(model.device)
+inputs.input_ids = inputs.input_ids.to(model.device)
 
 generate_ids = model.generate(**inputs, max_length=256)
 generate_ids = generate_ids[:, inputs.input_ids.size(1):]
@@ -114,12 +121,17 @@ response = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_
 ```
 
 ### Audio Analysis Inference
+
 In the audio analysis, users could provide both audio and text instructions for analysis:
+
 ```python
 from io import BytesIO
 from urllib.request import urlopen
+
 import librosa
-from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
+
+from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+
 
 processor = AutoProcessor.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct")
 model = Qwen2AudioForConditionalGeneration.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct", device_map="auto")
@@ -152,8 +164,8 @@ for message in conversation:
                         sr=processor.feature_extractor.sampling_rate)[0]
                 )
 
-inputs = processor(text=text, audios=audios, return_tensors="pt", padding=True)
-inputs.input_ids = inputs.input_ids.to("cuda")
+inputs = processor(text=text, audio=audios, return_tensors="pt", padding=True).to(model.device)
+inputs.input_ids = inputs.input_ids.to(model.device)
 
 generate_ids = model.generate(**inputs, max_length=256)
 generate_ids = generate_ids[:, inputs.input_ids.size(1):]
@@ -162,12 +174,17 @@ response = processor.batch_decode(generate_ids, skip_special_tokens=True, clean_
 ```
 
 ### Batch Inference
+
 We also support batch inference:
+
 ```python
 from io import BytesIO
 from urllib.request import urlopen
+
 import librosa
-from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
+
+from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+
 
 processor = AutoProcessor.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct")
 model = Qwen2AudioForConditionalGeneration.from_pretrained("Qwen/Qwen2-Audio-7B-Instruct", device_map="auto")
@@ -207,9 +224,9 @@ for conversation in conversations:
                             sr=processor.feature_extractor.sampling_rate)[0]
                     )
 
-inputs = processor(text=text, audios=audios, return_tensors="pt", padding=True)
-inputs['input_ids'] = inputs['input_ids'].to("cuda")
-inputs.input_ids = inputs.input_ids.to("cuda")
+inputs = processor(text=text, audio=audios, return_tensors="pt", padding=True).to(model.device)
+inputs['input_ids'] = inputs['input_ids'].to(model.device)
+inputs.input_ids = inputs.input_ids.to(model.device)
 
 generate_ids = model.generate(**inputs, max_length=256)
 generate_ids = generate_ids[:, inputs.input_ids.size(1):]

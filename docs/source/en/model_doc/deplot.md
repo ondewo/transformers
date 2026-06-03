@@ -13,16 +13,14 @@ specific language governing permissions and limitations under the License.
 rendered properly in your Markdown viewer.
 
 -->
+*This model was released on 2022-12-20 and added to Hugging Face Transformers on 2023-06-20.*
 
 # DePlot
 
-<div class="flex flex-wrap space-x-1">
-<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
-</div>
 
-## Overview 
+## Overview
 
-DePlot was proposed in the paper [DePlot: One-shot visual language reasoning by plot-to-table translation](https://arxiv.org/abs/2212.10505) from Fangyu Liu, Julian Martin Eisenschlos, Francesco Piccinno, Syrine Krichene, Chenxi Pang, Kenton Lee, Mandar Joshi, Wenhu Chen, Nigel Collier, Yasemin Altun.
+DePlot was proposed in the paper [DePlot: One-shot visual language reasoning by plot-to-table translation](https://huggingface.co/papers/2212.10505) from Fangyu Liu, Julian Martin Eisenschlos, Francesco Piccinno, Syrine Krichene, Chenxi Pang, Kenton Lee, Mandar Joshi, Wenhu Chen, Nigel Collier, Yasemin Altun.
 
 The abstract of the paper states the following:
 
@@ -35,20 +33,21 @@ DePlot is a Visual Question Answering subset of `Pix2Struct` architecture. It re
 
 Currently one checkpoint is available for DePlot:
 
-- `google/deplot`: DePlot fine-tuned on ChartQA dataset 
-
+- `google/deplot`: DePlot fine-tuned on ChartQA dataset
 
 ```python
-from transformers import AutoProcessor, Pix2StructForConditionalGeneration
 import requests
 from PIL import Image
 
-model = Pix2StructForConditionalGeneration.from_pretrained("google/deplot")
+from transformers import AutoProcessor, Pix2StructForConditionalGeneration
+
+
+model = Pix2StructForConditionalGeneration.from_pretrained("google/deplot", device_map="auto")
 processor = AutoProcessor.from_pretrained("google/deplot")
 url = "https://raw.githubusercontent.com/vis-nlp/ChartQA/main/ChartQA%20Dataset/val/png/5090.png"
 image = Image.open(requests.get(url, stream=True).raw)
 
-inputs = processor(images=image, text="Generate underlying data table of the figure below:", return_tensors="pt")
+inputs = processor(images=image, text="Generate underlying data table of the figure below:", return_tensors="pt").to(model.device)
 predictions = model.generate(**inputs, max_new_tokens=512)
 print(processor.decode(predictions[0], skip_special_tokens=True))
 ```
@@ -56,8 +55,10 @@ print(processor.decode(predictions[0], skip_special_tokens=True))
 ## Fine-tuning
 
 To fine-tune DePlot, refer to the pix2struct [fine-tuning notebook](https://github.com/huggingface/notebooks/blob/main/examples/image_captioning_pix2struct.ipynb). For `Pix2Struct` models, we have found out that fine-tuning the model with Adafactor and cosine learning rate scheduler leads to faster convergence:
+
 ```python
 from transformers.optimization import Adafactor, get_cosine_schedule_with_warmup
+
 
 optimizer = Adafactor(self.parameters(), scale_parameter=False, relative_step=False, lr=0.01, weight_decay=1e-05)
 scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=1000, num_training_steps=40000)

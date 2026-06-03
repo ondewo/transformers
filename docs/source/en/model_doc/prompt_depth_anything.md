@@ -13,13 +13,13 @@ specific language governing permissions and limitations under the License.
 rendered properly in your Markdown viewer.
 
 -->
+*This model was released on 2024-12-18 and added to Hugging Face Transformers on 2025-03-21.*
 
 # Prompt Depth Anything
 
 ## Overview
 
-The Prompt Depth Anything model was introduced in [Prompting Depth Anything for 4K Resolution Accurate Metric Depth Estimation](https://arxiv.org/abs/2412.14015) by Haotong Lin, Sida Peng, Jingxiao Chen, Songyou Peng, Jiaming Sun, Minghuan Liu, Hujun Bao, Jiashi Feng, Xiaowei Zhou, Bingyi Kang. 
-
+The Prompt Depth Anything model was introduced in [Prompting Depth Anything for 4K Resolution Accurate Metric Depth Estimation](https://huggingface.co/papers/2412.14015) by Haotong Lin, Sida Peng, Jingxiao Chen, Songyou Peng, Jiaming Sun, Minghuan Liu, Hujun Bao, Jiashi Feng, Xiaowei Zhou, Bingyi Kang.
 
 The abstract from the paper is as follows:
 
@@ -28,47 +28,47 @@ The abstract from the paper is as follows:
 <img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/model_doc/prompt_depth_anything_architecture.jpg"
 alt="drawing" width="600"/>
 
-<small> Prompt Depth Anything overview. Taken from the <a href="https://arxiv.org/pdf/2412.14015">original paper</a>.</small>
+<small> Prompt Depth Anything overview. Taken from the <a href="https://huggingface.co/papers/2412.14015">original paper</a>.</small>
 
 ## Usage example
 
 The Transformers library allows you to use the model with just a few lines of code:
 
 ```python
->>> import torch
->>> import requests
->>> import numpy as np
+import requests
+import torch
+from PIL import Image
 
->>> from PIL import Image
->>> from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
->>> url = "https://github.com/DepthAnything/PromptDA/blob/main/assets/example_images/image.jpg?raw=true"
->>> image = Image.open(requests.get(url, stream=True).raw)
 
->>> image_processor = AutoImageProcessor.from_pretrained("depth-anything/prompt-depth-anything-vits-hf")
->>> model = AutoModelForDepthEstimation.from_pretrained("depth-anything/prompt-depth-anything-vits-hf")
+url = "https://github.com/DepthAnything/PromptDA/blob/main/assets/example_images/image.jpg?raw=true"
+image = Image.open(requests.get(url, stream=True).raw)
 
->>> prompt_depth_url = "https://github.com/DepthAnything/PromptDA/blob/main/assets/example_images/arkit_depth.png?raw=true"
->>> prompt_depth = Image.open(requests.get(prompt_depth_url, stream=True).raw)
->>> # the prompt depth can be None, and the model will output a monocular relative depth.
+image_processor = AutoImageProcessor.from_pretrained("depth-anything/prompt-depth-anything-vits-hf")
+model = AutoModelForDepthEstimation.from_pretrained("depth-anything/prompt-depth-anything-vits-hf", device_map="auto")
 
->>> # prepare image for the model
->>> inputs = image_processor(images=image, return_tensors="pt", prompt_depth=prompt_depth)
+prompt_depth_url = "https://github.com/DepthAnything/PromptDA/blob/main/assets/example_images/arkit_depth.png?raw=true"
+prompt_depth = Image.open(requests.get(prompt_depth_url, stream=True).raw)
+# the prompt depth can be None, and the model will output a monocular relative depth.
 
->>> with torch.no_grad():
-...     outputs = model(**inputs)
+# prepare image for the model
+inputs = image_processor(images=image, return_tensors="pt", prompt_depth=prompt_depth).to(model.device)
 
->>> # interpolate to original size
->>> post_processed_output = image_processor.post_process_depth_estimation(
-...     outputs,
-...     target_sizes=[(image.height, image.width)],
-... )
+with torch.no_grad():
+    outputs = model(**inputs)
 
->>> # visualize the prediction
->>> predicted_depth = post_processed_output[0]["predicted_depth"]
->>> depth = predicted_depth * 1000 
->>> depth = depth.detach().cpu().numpy()
->>> depth = Image.fromarray(depth.astype("uint16")) # mm
+# interpolate to original size
+post_processed_output = image_processor.post_process_depth_estimation(
+    outputs,
+    target_sizes=[(image.height, image.width)],
+)
+
+# visualize the prediction
+predicted_depth = post_processed_output[0]["predicted_depth"]
+depth = predicted_depth * 1000
+depth = depth.detach().cpu().numpy()
+depth = Image.fromarray(depth.astype("uint16")) # mm
 ```
 
 ## Resources
@@ -92,5 +92,11 @@ If you are interested in submitting a resource to be included here, please feel 
 ## PromptDepthAnythingImageProcessor
 
 [[autodoc]] PromptDepthAnythingImageProcessor
+    - preprocess
+    - post_process_depth_estimation
+
+## PromptDepthAnythingImageProcessorPil
+
+[[autodoc]] PromptDepthAnythingImageProcessorPil
     - preprocess
     - post_process_depth_estimation

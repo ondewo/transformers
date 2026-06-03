@@ -13,17 +13,18 @@ specific language governing permissions and limitations under the License.
 rendered properly in your Markdown viewer.
 
 -->
+*This model was released on 2024-08-29 and added to Hugging Face Transformers on 2024-08-26.*
 
 # Qwen2-VL
 
 <div class="flex flex-wrap space-x-1">
-<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
 <img alt="FlashAttention" src="https://img.shields.io/badge/%E2%9A%A1%EF%B8%8E%20FlashAttention-eae0c8?style=flat">
+<img alt="Tensor parallelism" src="https://img.shields.io/badge/Tensor%20parallelism-06b6d4?style=flat&logoColor=white">
 </div>
 
 ## Overview
 
-The [Qwen2-VL](https://qwenlm.github.io/blog/qwen2-vl/) model is a major update to [Qwen-VL](https://arxiv.org/pdf/2308.12966) from the Qwen team at Alibaba Research. 
+The [Qwen2-VL](https://huggingface.co/papers/2409.12191) ([blog post](https://qwenlm.github.io/blog/qwen2-vl/)) model is a major update to [Qwen-VL](https://huggingface.co/papers/2308.12966) from the Qwen team at Alibaba Research.
 
 The abstract from the blog is the following:
 
@@ -43,9 +44,8 @@ This model was contributed by [simonJJJ](https://huggingface.co/simonJJJ).
 The model can accept both images and videos as input. Here's an example code for inference.
 
 ```python
+from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
-import torch
-from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 
 # Load the model in half-precision on the available device(s)
 model = Qwen2VLForConditionalGeneration.from_pretrained("Qwen/Qwen2-VL-7B-Instruct", device_map="auto")
@@ -97,7 +97,7 @@ conversation = [
 
 inputs = processor.apply_chat_template(
     conversation,
-    video_fps=1,
+    fps=1,
     add_generation_prompt=True,
     tokenize=True,
     return_dict=True,
@@ -167,7 +167,7 @@ conversations = [conversation1, conversation2, conversation3, conversation4]
 # Preparation for batch inference
 ipnuts = processor.apply_chat_template(
     conversations,
-    video_fps=1,
+    fps=1,
     add_generation_prompt=True,
     tokenize=True,
     return_dict=True,
@@ -198,11 +198,11 @@ In case of limited GPU RAM, one can reduce the resolution as follows:
 
 ```python
 min_pixels = 256*28*28
-max_pixels = 1024*28*28 
+max_pixels = 1024*28*28
 processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct", min_pixels=min_pixels, max_pixels=max_pixels)
 ```
-This ensures each image gets encoded using a number between 256-1024 tokens. The 28 comes from the fact that the model uses a patch size of 14 and a temporal patch size of 2 (14 x 2 = 28).
 
+This ensures each image gets encoded using a number between 256-1024 tokens. The 28 comes from the fact that the model uses a patch size of 14 and a temporal patch size of 2 (14 x 2 = 28).
 
 #### Multiple Image Inputs
 
@@ -213,7 +213,7 @@ conversation = [
     {
         "role": "user",
         "content": [
-            {"type": "image"}, 
+            {"type": "image"},
             {"type": "text", "text": "Hello, how are you?"}
         ]
     },
@@ -224,10 +224,10 @@ conversation = [
     {
         "role": "user",
         "content": [
-            {"type": "text", "text": "Can you describe these images and video?"}, 
-            {"type": "image"}, 
-            {"type": "image"}, 
-            {"type": "video"}, 
+            {"type": "text", "text": "Can you describe these images and video?"},
+            {"type": "image"},
+            {"type": "image"},
+            {"type": "video"},
             {"type": "text", "text": "These are from my vacation."}
         ]
     },
@@ -249,7 +249,6 @@ prompt_without_id = processor.apply_chat_template(conversation, add_generation_p
 # add ids
 prompt_with_id = processor.apply_chat_template(conversation, add_generation_prompt=True, add_vision_id=True)
 # Excepted output: '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nPicture 1: <|vision_start|><|image_pad|><|vision_end|>Hello, how are you?<|im_end|>\n<|im_start|>assistant\nI'm doing well, thank you for asking. How can I assist you today?<|im_end|>\n<|im_start|>user\nCan you describe these images and video?Picture 2: <|vision_start|><|image_pad|><|vision_end|>Picture 3: <|vision_start|><|image_pad|><|vision_end|>Video 1: <|vision_start|><|video_pad|><|vision_end|>These are from my vacation.<|im_end|>\n<|im_start|>assistant\nI'd be happy to describe the images and video for you. Could you please provide more context about your vacation?<|im_end|>\n<|im_start|>user\nIt was a trip to the mountains. Can you see the details in the images and video?<|im_end|>\n<|im_start|>assistant\n'
-
 ```
 
 #### Flash-Attention 2 to speed up generation
@@ -268,36 +267,58 @@ To load and run a model using Flash Attention-2, simply add `attn_implementation
 from transformers import Qwen2VLForConditionalGeneration
 
 model = Qwen2VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen2-VL-7B-Instruct", 
-    torch_dtype=torch.bfloat16, 
+    "Qwen/Qwen2-VL-7B-Instruct", , 
     attn_implementation="flash_attention_2",
-)
+ device_map="auto")
 ```
 
 ## Qwen2VLConfig
 
 [[autodoc]] Qwen2VLConfig
 
+## Qwen2VLVisionConfig
+
+[[autodoc]] Qwen2VLVisionConfig
+
+## Qwen2VLTextConfig
+
+[[autodoc]] Qwen2VLTextConfig
+
 ## Qwen2VLImageProcessor
 
 [[autodoc]] Qwen2VLImageProcessor
     - preprocess
 
-## Qwen2VLImageProcessorFast
+## Qwen2VLVideoProcessor
 
-[[autodoc]] Qwen2VLImageProcessorFast
+[[autodoc]] Qwen2VLVideoProcessor
+    - preprocess
+
+## Qwen2VLImageProcessorPil
+
+[[autodoc]] Qwen2VLImageProcessorPil
     - preprocess
 
 ## Qwen2VLProcessor
 
 [[autodoc]] Qwen2VLProcessor
+    - __call__
+
+## Qwen2VLTextModel
+
+[[autodoc]] Qwen2VLTextModel
+    - forward
 
 ## Qwen2VLModel
 
 [[autodoc]] Qwen2VLModel
     - forward
+    - get_video_features
+    - get_image_features
 
 ## Qwen2VLForConditionalGeneration
 
 [[autodoc]] Qwen2VLForConditionalGeneration
     - forward
+    - get_video_features
+    - get_image_features

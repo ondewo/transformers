@@ -13,75 +13,152 @@ rendered properly in your Markdown viewer.
 
 -->
 
-# Attention Interface
+# Attention backends
 
-This page describes how to use the `AttentionInterface` in order to register custom attention functions to use with
-supported models.
+All attention implementations perform the same computation. Every token is compared to every other token. The difference is *how* the computation is performed. Basic attention scales poorly because it materializes the full attention matrix in memory, creating bottlenecks that slow down inference. Optimized implementations rearrange the math to reduce memory traffic for faster, more affordable inference.
 
-## Customizing attention function
+The [`AttentionInterface`] provides optimized attention implementations. It decouples the attention implementation from the model implementation to simplify experimentation with different functions. Add new backends easily with this consistent interface.
 
-Most recent models can now switch from one attention function used in the Attention layer to the other, thanks to a simple mapping.
-By default, we provide the implementation for [`sdpa`](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html),
-[`flash_attention_2`](https://github.com/Dao-AILab/flash-attention) and [`flex_attention`](https://pytorch.org/docs/stable/nn.attention.flex_attention.html#module-torch.nn.attention.flex_attention)
-as well as `eager`, which is simple matrix multiplication without any optimization on top.  
-This is the setting you can usually choose when instantiating a model:
+| attention backend | description |
+|---|---|
+| `"flash_attention_3"` | improves FlashAttention-2 by also overlapping operations and fusing forward and backward passes more tightly |
+| `"flash_attention_2"` | tiles computations into smaller blocks and uses fast on-chip memory |
+| `"flex_attention"` | framework for specifying custom attention patterns (sparse, block-local, sliding window) without writing low-level kernels by hand |
+| `"sdpa"` | built-in PyTorch implementation of [scaled dot product attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) |
+| <code>"paged&#124;flash_attention_3"</code> | Paged version of FlashAttention-3 |
+| <code>"paged&#124;flash_attention_2"</code> | Paged version of FlashAttention-2 |
+| <code>"paged&#124;sdpa"</code> | Paged version of SDPA |
+| <code>"paged&#124;eager"</code> | Paged version of eager |
 
-```python
+## Set an attention backend
+
+Use the `attn_implementation` argument in [`~PreTrainedModel.from_pretrained`] to instantiate a model with a specific attention function.
+
+```py
+import torch
 from transformers import AutoModelForCausalLM
 
-model_id = "meta-llama/Llama-3.2-1B
-
-# Here, using flash attention as an example
-model = AutoModelForCausalLM.from_pretrained(model_id, attn_implementation="flash_attention_2")
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.2-1B", attn_implementation="flash_attention_2"
+)
 ```
 
-But what if you wanted to create your own attention function? Or simply play around with existing ones, adding
-a few statements here and there? You can now do so with the `AttentionInterface`! Here is an example:
+Switch between attention backends at runtime without reloading the model using [`~PreTrainedModel.set_attn_implementation`].
+
+```py
+model.set_attn_implementation("sdpa")
+```
+
+### Kernels
+
+Download and load compiled compute kernels directly from the [Hub](https://huggingface.co/models?other=kernels) at runtime with the [Kernels](https://huggingface.co/docs/kernels/index) library. This avoids packaging issues from mismatched PyTorch or CUDA versions.
+
+Kernels automatically register to [`AttentionInterface`] upon detection. You don't need to install the FlashAttention package explicitly.
+
+```py
+import torch
+from transformers import AutoModelForCausalLM
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.2-1B", attn_implementation="kernels-community/flash-attn2"
+)
+```
+
+### SDPA context manager
+
+PyTorch's scaled dot product attention (SDPA) selects the fastest attention function for CUDA backends automatically. It defaults to the PyTorch C++ implementation for other backends.
+
+Force SDPA to use a specific implementation with the [torch.nn.attention.sdpa_kernel](https://pytorch.org/docs/stable/generated/torch.nn.attention.sdpa_kernel.html) context manager.
+
+```py
+import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from transformers import AutoModelForCausalLM
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.2-1B", attn_implementation="sdpa"
+)
+
+with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+    outputs = model.generate(**inputs)
+```
+
+## Backbone-specific attention
+
+Multimodal models use different backbones for each modality. Optimize performance by assigning specific attention functions to each backbone. Some vision backbones perform better in fp32, for example, which FlashAttention does not support.
+
+Map vision backbones to different attention functions with a dict while the text backbone continues to use FlashAttention. Keys in the attention implementation must match sub-config names.
+
+```py
+from transformers import AutoModelForImageTextToText
+
+attention_implementation_per_backbone = {"vision_config": "sdpa", "text_config": "flash_attention_2"}
+
+for key in attention_implementation_per_backbone:
+    assert key in model.config.sub_configs, f"Invalid key in `attention_implementation`"
+
+model = AutoModelForImageTextToText.from_pretrained(
+    "facebook/chameleon-7b", attn_implementation=attention_implementation_per_backbone
+)
+```
+
+Omit certain backbones from the dict to use the default attention function (SDPA).
+
+```py
+model = AutoModelForImageTextToText.from_pretrained(
+    "facebook/chameleon-7b", attn_implementation={"text_config": "flash_attention_2"}
+)
+```
+
+Set the same attention function for all backbones with a single string.
+
+```py
+model = AutoModelForImageTextToText.from_pretrained(
+    "facebook/chameleon-7b", attn_implementation="eager"
+)
+```
+
+Set the attention function globally with an empty key.
+
+```py
+model = AutoModelForImageTextToText.from_pretrained(
+    "facebook/chameleon-7b", attn_implementation={"": "eager"}
+)
+```
+
+## Create a new attention function
+
+Customize or create new attention functions by adding them to the attention registry with [`AttentionInterface.register`]. Models use these functions through the `attn_implementation` argument.
+
+> [!WARNING]  
+> Register a matching attention mask function when you register a custom attention function. If the custom `attn_implementation` name is not registered in [`AttentionMaskInterface`], Transformers skips mask creation and passes `attention_mask=None` to the attention layers. Your attention function must handle causal, padding, packing, or sliding-window constraints itself, or those constraints can be silently dropped.
+
+This example customizes the attention function to print a statement for each layer. It keeps the mask in the original implementation by registering `masking_utils.sdpa_mask` as the attention mask function.
 
 ```python
-from transformers import AutoModelForCausalLM, AttentionInterface
-from transformers.integrations.sdpa_attention import sdpa_attention_forward
 import torch
-
-model_id = "meta-llama/Llama-3.2-1B
+from transformers import AutoModelForCausalLM, AttentionInterface, AttentionMaskInterface
+from transformers.integrations.sdpa_attention import sdpa_attention_forward
+from transformers.masking_utils import sdpa_mask
 
 def my_new_sdpa(*args, **kwargs):
     print("I just entered the attention computation")
     return sdpa_attention_forward(*args, **kwargs)
 
 AttentionInterface.register("my_new_sdpa", my_new_sdpa)
+AttentionMaskInterface.register("my_new_sdpa", sdpa_mask)  # must have the same name as the registered attention function
 
-model = AutoModelForCausalLM.from_pretrained(model_id, attn_implementation="my_new_sdpa")
-# Try running the forward with the new attention function
+model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B", attn_implementation="my_new_sdpa")
 model(torch.ones(1, 5, dtype=int))
 ```
 
-You will see it prints "I just entered the attention computation" as many times as there are layers in the model (with this example, 16 times.
-
-## Dynamically switching attention function
-
-You could dynamically change the model's attention function as well, by overriding the `config._attn_implementation` field:
+You can also add new arguments to the attention function. Models supporting [`AttentionInterface`] propagate kwargs to attention layers and the attention function. Pass arguments as kwargs in the model's forward function. Custom attention functions must follow this signature and return format.
 
 ```python
-# Back to use original sdpa implementation
-model.config._attn_implementation = "sdpa"
-
-model(torch.ones(1, 5, dtype=int))
-```
-
-and it will stop printing the statements, as it now uses the `sdpa` attention.  
-This allows to quickly change attention function, without needing to reload the model!
-
-## What about new args needed in my custom function?
-
-But indeed, what if the new function requires a new arg to be properly used? It's no issue! Models supporting the
-`AttentionInterface` propagates kwargs all the way to the Attention layers, and to the attention function used. That way,
-you can simply pass the arg (as a kwargs, i.e. you need to qualify the name of the arg) in the model's forward, and it will be correctly used in the attention. However, custom attention functions have some limitations. In particular, it must follow the signature and return format of other attention functions, i.e.
-
-```python
-from transformers import AutoModelForCausalLM, AttentionInterface
-from transformers.integrations.sdpa_attention import sdpa_attention_forward
 import torch
+from transformers import AutoModelForCausalLM, AttentionInterface, AttentionMaskInterface
+from transformers.integrations.sdpa_attention import sdpa_attention_forward
+from transformers.masking_utils import sdpa_mask
 
 def custom_attention(
     module: torch.nn.Module,  # required arg
@@ -92,15 +169,175 @@ def custom_attention(
     a_new_kwargs = None,  # You can now add as many kwargs as you need
     another_new_kwargs = None,  # You can now add as many kwargs as you need
     **kwargs,  # You need to accept **kwargs as models will pass other args
-) -> Tuple[torch.Tensor, Optional[torch.Tensor]]
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]
     ...  # do your magic!
     return attn_output, attn_weights  # attn_weights are optional here
 
 AttentionInterface.register("custom", custom_attention)
+AttentionMaskInterface.register("custom", sdpa_mask)  # to leave the existing mask untouched
 
 model = AutoModelForCausalLM.from_pretrained(model_id, attn_implementation="custom")
-# Forward pass with the new kwargs
 model(torch.ones(1, 5, dtype=int), a_new_kwargs=..., another_new_kwargs=...)
 ```
 
-If in doubt about what args/kwargs a given model sends to the attention function, simply check that model's modeling code on [GitHub](https://github.com/huggingface/transformers/tree/main/src/transformers/models)!
+Check a model's [modeling code](https://github.com/huggingface/transformers/tree/main/src/transformers/models) to confirm what arguments and kwargs it sends to the attention function.
+
+## AttentionMaskInterface
+
+[`AttentionMaskInterface`] is the registry the [`create_*_mask`](#build-an-attention-mask) functions consult to convert a mask into the format the active attention backend expects. FlexAttention needs a [BlockMask](https://docs.pytorch.org/docs/stable/nn.attention.flex_attention.html#torch.nn.attention.flex_attention.BlockMask), SDPA needs a 4D tensor, and FlashAttention needs the base 2D padding mask. Register a custom backend, or override the formatter for an existing one, with [`AttentionMaskInterface.register`].
+
+```python
+import torch
+from transformers import AttentionMaskInterface
+from transformers.masking_utils import sdpa_mask
+
+def my_new_sdpa_mask(*args, **kwargs):
+    print("I just entered the attention mask computation")
+    return sdpa_mask(*args, **kwargs)
+
+AttentionMaskInterface.register("my_new_sdpa_mask", my_new_sdpa_mask)
+```
+
+Without a registered formatter for the active `attn_implementation`, mask creation is skipped and `attention_mask=None` passes to the attention layers.
+
+Registered functions must match this signature.
+
+```python
+def custom_attention_mask(
+    batch_size: int,  # required arg
+    q_length: int,  # required arg
+    kv_length: int,  # required arg
+    q_offset: int = 0,  # required arg
+    kv_offset: int = 0,  # required arg
+    mask_function: Callable = causal_mask_function,  # required arg
+    attention_mask: Optional[torch.Tensor] = None,  # required arg
+    **kwargs,  # a few additional args may be passed as kwargs, especially the model's config is always passed
+) -> Optional[torch.Tensor]:
+```
+
+The `mask_function` argument is a `Callable` that mimics PyTorch's [mask_mod](https://pytorch.org/blog/flexattention/) functions. It takes 4 indices `(batch_idx, head_idx, q_idx, kv_idx)` and returns a boolean indicating whether that position contributes to the attention computation. This is the same primitive shape used by `or_mask_function` and `and_mask_function` in [Build an attention mask](#build-an-attention-mask).
+
+> [!TIP]
+> Use this [workaround](https://github.com/huggingface/transformers/blob/main/src/transformers/integrations/executorch.py) for torch.export if `mask_function` fails to create a mask.
+
+## Build an attention mask
+
+Build attention masks with the `create_*_mask` functions in [transformers.masking_utils](https://github.com/huggingface/transformers/blob/main/src/transformers/masking_utils.py#L894). Each function reads the active attention backend from the model config, looks up the backend's mask formatter in [`AttentionMaskInterface`], and returns the format that backend expects. You don't need to invert, expand, or cast the mask yourself.
+
+Pick the function that matches the attention pattern.
+
+| function | use case |
+|---|---|
+| [`create_causal_mask`] | decoder-only models where each token attends to itself and earlier tokens |
+| [`create_bidirectional_mask`] | encoder models, or cross-attention from a decoder to encoder states |
+| [`create_sliding_window_causal_mask`] | decoder models with a sliding-window attention pattern |
+| [`create_chunked_causal_mask`] | decoder models that chunk the sequence into fixed-size blocks |
+| [`create_bidirectional_sliding_window_mask`] | encoder models with a sliding-window attention pattern |
+
+> [!WARNING]
+> The legacy callable mask helpers - `get_extended_attention_mask`, `create_extended_attention_mask_for_decoder`, `invert_attention_mask` - emit a deprecation warning and will be removed in a future release. Use the `create_*_mask` functions instead.
+
+<hfoptions id="build-mask">
+<hfoption id="causal attention">
+
+Call [`create_causal_mask`] inside a decoder forward pass. Pass the config, the input embeddings, the user-provided 2D `attention_mask`, and the cache. The function uses the embeddings to read the batch size, query length, dtype, and device, and uses the cache to compute the key length.
+
+```py
+from transformers.masking_utils import create_causal_mask
+
+attention_mask = create_causal_mask(
+    config=self.config,
+    inputs_embeds=inputs_embeds,
+    attention_mask=attention_mask,
+    past_key_values=past_key_values,
+)
+```
+
+</hfoption>
+<hfoption id="encoder self-attention">
+
+Call [`create_bidirectional_mask`] for encoder self-attention. Drop `past_key_values` because encoders don't cache.
+
+```py
+from transformers.masking_utils import create_bidirectional_mask
+
+attention_mask = create_bidirectional_mask(
+    config=self.config,
+    inputs_embeds=embedding_output,
+    attention_mask=attention_mask,
+)
+```
+
+</hfoption>
+<hfoption id="cross-attention">
+
+For cross-attention, pass the encoder states as `encoder_hidden_states` so the mask uses the encoder's key and value length instead of the decoder's query length.
+
+```py
+encoder_attention_mask = create_bidirectional_mask(
+    config=self.config,
+    inputs_embeds=embedding_output,
+    attention_mask=encoder_attention_mask,
+    encoder_hidden_states=encoder_hidden_states,
+)
+```
+
+</hfoption>
+</hfoptions>
+
+Add extra constraints on top of the base mask with the `or_mask_function` and `and_mask_function` arguments. Use `or_mask_function` to let additional positions attend, and `and_mask_function` to restrict the base pattern further. Both follow the 4-index `mask_function` signature described in [AttentionMaskInterface](#attentionmaskinterface). They take `(batch_idx, head_idx, q_idx, kv_idx)` and return a boolean.
+
+> [!WARNING]
+> `or_mask_function` and `and_mask_function` can express any attention pattern, but they're slower than the built-in patterns and are not compatible with ExecuTorch. The overhead is most noticeable on smaller models (~200M parameters), where mask creation takes a larger share of forward-pass time. Reach for them only when the standard `create_*_mask` functions can't express what you need.
+
+For example, overlay a function that returns `True` everywhere on a causal mask to turn it into a fully bidirectional one. The union with the causal pattern lets every token attend to every other token.
+
+```py
+mask_kwargs = {
+    "config": self.config,
+    "inputs_embeds": inputs_embeds,
+    "attention_mask": attention_mask,
+    "past_key_values": past_key_values,
+    "position_ids": position_ids,
+    "or_mask_function": lambda *args: torch.tensor(True, dtype=torch.bool),
+}
+
+attention_mask = create_causal_mask(**mask_kwargs)
+```
+
+During generation, [`~GenerationMixin.generate`] builds masks through [`create_masks_for_generate`], which dispatches to the right `create_*_mask` based on the model config. Override it on a model class to plug in a custom masking strategy for generation.
+
+## Bidirectional attention
+
+Decoder-only models use causal (unidirectional) attention by default, where each token only attends to itself and previous tokens. Set `is_causal=False` to switch to bidirectional attention, where every token attends to every other token. This lets you use decoder-only models as text encoders, for example, to generate embeddings.
+
+> [!NOTE]
+> This only works for causal (decoder) models. It does not turn encoder models into decoder models.
+
+Set `is_causal=False` in the model config to make bidirectional attention the default for every forward pass.
+
+```py
+from transformers import AutoModel, AutoConfig
+
+config = AutoConfig.from_pretrained("meta-llama/Llama-3.2-1B")
+config.is_causal = False
+
+model = AutoModel.from_pretrained("meta-llama/Llama-3.2-1B", config=config)
+
+# all forward passes now use bidirectional attention
+outputs = model(**inputs)
+```
+
+Pass `is_causal` in the forward call instead of the model config to switch between causal and bidirectional attention without loading the model twice. The kwarg temporarily overrides the config and is restored after the call.
+
+```py
+from transformers import AutoModel
+
+model = AutoModel.from_pretrained("meta-llama/Llama-3.2-1B")
+
+# run with bidirectional attention
+outputs = model(**inputs, is_causal=False)
+
+# run with default causal attention
+outputs = model(**inputs)
+```

@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024 HuggingFace Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,7 +24,7 @@ if is_torch_available():
     import torch
 
     from transformers import ROPE_INIT_FUNCTIONS
-    from transformers.modeling_rope_utils import rope_config_validation
+    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
 
 @require_torch
@@ -35,14 +34,19 @@ class RopeTest(unittest.TestCase):
         all_rope_types = ROPE_INIT_FUNCTIONS.keys()
 
         # The base config is always valid (default RoPE)
-        rope_config_validation(config)
+        config.validate_rope()
 
-        # If we explicitly set the other RoPE types, then validation should fail
+        # If we explicitly set the other (non-default) RoPE types with only rope_theta,
+        # validation should fail because required keys are missing (e.g. factor, short_factor)
         for rope_type in all_rope_types:
-            if rope_type != "default":
-                config.rope_scaling = {"rope_type": rope_type}
-                with self.assertRaises(KeyError):
-                    rope_config_validation(config)
+            if rope_type == "default":
+                continue  # "default" is always valid with just rope_theta
+            # proportional is same as default wrt to expected keys
+            if rope_type == "proportional":
+                continue
+            config.rope_parameters = {"rope_type": rope_type, "rope_theta": 10000.0}
+            with self.assertRaises(KeyError):
+                config.validate_rope()
 
         # Parameters are exclusive to their own RoPE type, and should raise an exception if incorrectly passed
         valid_param_mapping = {
@@ -55,80 +59,138 @@ class RopeTest(unittest.TestCase):
         }
         for rope_type in all_rope_types:
             if rope_type == "default":
-                continue  # checked above
+                continue  # "default" only warns about unrecognised keys, never raises KeyError
+            # proportional is same as default wrt to expected keys
+            if rope_type == "proportional":
+                continue
             for param, valid_rope_types in valid_param_mapping.items():
                 # Set `param` with a dummy value -- we want to test the dict key
-                config.rope_scaling = {"rope_type": rope_type, param: True}
+                config.rope_parameters = {"rope_type": rope_type, "rope_theta": 10000.0, param: True}
                 if rope_type in valid_rope_types:
                     continue
                 else:
                     with self.assertRaises(KeyError):
-                        rope_config_validation(config)
+                        config.validate_rope()
 
         # Any other parameters passed to RoPE will raise a warning that a particular key is not used
         # But sometimes we can have model-specific RoPE kwargs and bypass warning with `ignore_keys`
-        model_specific_kwarg = "mrope_sections"  # e,g in Qwen2-VL
+        config.ignore_keys_at_rope_validation = {"mrope_sections"}  # e,g in Qwen2-VL
+        config.rope_parameters = {"rope_type": "default", "rope_theta": 10000.0, "mrope_sections": True}
+        config.validate_rope()
 
+        with self.assertLogs("transformers.modeling_rope_utils", level="WARNING") as logs:
+            config.ignore_keys_at_rope_validation = set()
+            config.validate_rope()
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("mrope_sections", logs.output[0])
+
+        # We can indicate Different RoPE params for each attention type
+        # We can also have only one RoPE params defined for all layer, we don't raise an error
+        # because it is not required to have separate RoPE per layer type
+        config.layer_types = ["full_attention", "sliding_attention"]
+        config.rope_parameters = {
+            "full_attention": {"rope_type": "default", "rope_theta": 10000},
+            "sliding_attention": {"rope_type": "linear", "rope_theta": 10000, "factor": 2.0},
+        }
+        config.validate_rope()
+
+        config.rope_parameters = config.rope_parameters["full_attention"]
+        config.validate_rope()
+
+    def test_yarn_original_original_max_position_embeddings_validation(self):
+        """Tests that models with no/bad `original_max_position_embeddings` raise a warning"""
+        config = LlamaConfig()
+
+        # good rope config: has a factor AND original_max_position_embeddings -> no warnings
+        rope_config = {
+            "rope_type": "yarn",
+            "rope_theta": 10000.0,
+            "factor": 2.0,
+            "original_max_position_embeddings": int(config.max_position_embeddings / 2.0),
+        }
+        config.rope_parameters = rope_config
+        with self.assertRaises(AssertionError):  # confirm that no warnings are thrown
+            with self.assertLogs("transformers.modeling_rope_utils", level="WARNING") as logs:
+                config.validate_rope()
+
+        # bad rope config, no `original_max_position_embeddings` -> raise error
+        rope_config = {
+            "rope_type": "yarn",
+            "rope_theta": 10000.0,
+            "factor": 2.0,
+        }
+        config.rope_parameters = rope_config
+        with self.assertRaises(KeyError):
+            config.validate_rope()
+
+        # bad rope config, bad implicit fator -> warning
+        rope_config = {
+            "rope_type": "yarn",
+            "rope_theta": 10000.0,
+            "factor": 2.0,
+            "original_max_position_embeddings": 1,
+        }
+        config.rope_parameters = rope_config
+        with self.assertLogs("transformers.modeling_rope_utils", level="WARNING") as logs:
+            config.validate_rope()
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("implicit factor", logs.output[0])
+
+    def test_rope_validation_with_per_attention_type_nested_rope(self):
+        """Mirrors `test_rope_validation` with `config.layer_types` set, so that
+        `rope_parameters` takes the per-attention-type nested shape."""
+        config = LlamaConfig()
+        all_rope_types = ROPE_INIT_FUNCTIONS.keys()
+        config.layer_types = ["full_attention", "sliding_attention"]
+
+        def nest(full_attention_params):
+            return {
+                "full_attention": full_attention_params,
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+            }
+
+        # Each non-default RoPE type with only `rope_theta` should still raise
+        # KeyError (missing required keys) when wrapped in the nested shape.
         for rope_type in all_rope_types:
-            if rope_type == "default":
-                config.rope_scaling = {"rope_type": rope_type, model_specific_kwarg: True}
-                rope_config_validation(config, ignore_keys={model_specific_kwarg})
-                with self.assertLogs("transformers.modeling_rope_utils", level="WARNING") as logs:
-                    rope_config_validation(config)
-                    self.assertEqual(len(logs.output), 1)
-                    self.assertIn(model_specific_kwarg, logs.output[0])
+            if rope_type in ("default", "proportional"):
+                continue
+            config.rope_parameters = nest({"rope_type": rope_type, "rope_theta": 10000.0})
+            with self.assertRaises(KeyError):
+                config.validate_rope()
 
-    def test_default_rope_function_bc(self):
-        config = LlamaConfig()
-        device = torch_device
-
-        rope_kwargs = {
-            "rope_type": "default",
-            "dim": config.hidden_size // config.num_attention_heads,
-            "max_position_embeddings": config.max_position_embeddings,
-            "base": config.rope_theta,
+        # Parameters exclusive to a RoPE type should still raise when passed to
+        # the wrong type while in the nested shape.
+        valid_param_mapping = {
+            "factor": ["linear", "dynamic", "yarn", "longrope"],
+            "attention_factor": ["yarn", "longrope"],
+            "beta_fast": ["yarn"],
+            "beta_slow": ["yarn"],
+            "short_factor": ["longrope"],
+            "long_factor": ["longrope"],
         }
+        for rope_type in all_rope_types:
+            if rope_type in ("default", "proportional"):
+                continue
+            for param, valid_rope_types in valid_param_mapping.items():
+                config.rope_parameters = nest({"rope_type": rope_type, "rope_theta": 10000.0, param: True})
+                if rope_type in valid_rope_types:
+                    continue
+                with self.assertRaises(KeyError):
+                    config.validate_rope()
 
-        rope_fn = ROPE_INIT_FUNCTIONS["default"]
-        config_freqs = rope_fn(config=config, device=device)[0]
-        kwargs_freqs = rope_fn(**rope_kwargs, device=device)[0]
-        torch.testing.assert_close(config_freqs, kwargs_freqs)
-
-    def test_linear_rope_function_bc(self):
-        config = LlamaConfig()
-        config.rope_scaling = {"rope_type": "linear", "factor": 10.0}
-        device = torch_device
-
-        rope_kwargs = {
-            "rope_type": "linear",
-            "dim": config.hidden_size // config.num_attention_heads,
-            "max_position_embeddings": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "factor": 10.0,
-        }
-
-        rope_fn = ROPE_INIT_FUNCTIONS["linear"]
-        config_freqs = rope_fn(config=config, device=device)[0]
-        kwargs_freqs = rope_fn(**rope_kwargs, device=device)[0]
-        torch.testing.assert_close(config_freqs, kwargs_freqs)
-
-    def test_dynamic_rope_function_bc(self):
-        config = LlamaConfig()
-        config.rope_scaling = {"rope_type": "dynamic", "factor": 10.0}
-        device = torch_device
-
-        rope_kwargs = {
-            "rope_type": "dynamic",
-            "dim": config.hidden_size // config.num_attention_heads,
-            "max_position_embeddings": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "factor": 10.0,
-        }
-
-        rope_fn = ROPE_INIT_FUNCTIONS["dynamic"]
-        config_freqs = rope_fn(config=config, device=device)[0]
-        kwargs_freqs = rope_fn(**rope_kwargs, device=device)[0]
-        torch.testing.assert_close(config_freqs, kwargs_freqs)
+        # A complete yarn entry under the nested shape should validate cleanly.
+        # Regression: previously the implicit-factor check inside the yarn
+        # validator dereferenced `self.rope_parameters` (the full nested dict)
+        # rather than its per-type `rope_parameters` argument.
+        config.rope_parameters = nest(
+            {
+                "rope_type": "yarn",
+                "rope_theta": 10000.0,
+                "factor": 2.0,
+                "original_max_position_embeddings": int(config.max_position_embeddings / 2.0),
+            }
+        )
+        config.validate_rope()
 
     def test_default_rope_numerically(self):
         # Note: some RoPE scaling methods start off by calling the default RoPE frequencies. If this test fails, then
@@ -153,13 +215,12 @@ class RopeTest(unittest.TestCase):
 
         # input sanity checks: if these change, the output will also change
         config = LlamaConfig()
-        self.assertEqual(config.rope_scaling, None)
+        self.assertEqual(config.rope_parameters, {"rope_type": "default", "rope_theta": 10000.0})
         self.assertEqual(config.hidden_size, 4096)
         self.assertEqual(config.num_attention_heads, 32)
-        self.assertEqual(config.rope_theta, 10000.0)
         self.assertFalse(hasattr(config, "partial_rotary_factor"))
 
-        rope_fn = ROPE_INIT_FUNCTIONS["default"]
+        rope_fn = LlamaRotaryEmbedding.compute_default_rope_parameters
         inv_freq, attention_scale = rope_fn(config=config, device=torch_device)
 
         self.assertEqual(attention_scale, 1.0)  # attention scale is always 1 for default RoPE
@@ -169,12 +230,12 @@ class RopeTest(unittest.TestCase):
         # This is a linear scaling strategy, the **frequencies** are scaled linearly with respect to the default
         # frequencies (= the inverse frequencies are scaled **inversely**)
         config = LlamaConfig()
-        default_rope_fn = ROPE_INIT_FUNCTIONS["default"]
+        default_rope_fn = LlamaRotaryEmbedding.compute_default_rope_parameters
         default_inv_freq, _ = default_rope_fn(config=config, device=torch_device)
 
         rope_fn = ROPE_INIT_FUNCTIONS["linear"]
         for factor in (2.0, 10.0, 20.0):
-            config.rope_scaling = {"rope_type": "linear", "factor": factor}
+            config.rope_parameters = {"rope_type": "linear", "rope_theta": 10000.0, "factor": factor}
             inv_freq, attention_scale = rope_fn(config=config, device=torch_device)
             self.assertEqual(attention_scale, 1.0)  # attention scale is always 1 for linear RoPE
             torch.testing.assert_close(inv_freq, default_inv_freq / factor)
@@ -200,20 +261,19 @@ class RopeTest(unittest.TestCase):
 
         # input sanity checks: if these change, the output will also change
         config = LlamaConfig()
-        self.assertEqual(config.rope_scaling, None)
+        self.assertEqual(config.rope_parameters, {"rope_type": "default", "rope_theta": 10000.0})
         self.assertEqual(config.hidden_size, 4096)
         self.assertEqual(config.num_attention_heads, 32)
-        self.assertEqual(config.rope_theta, 10000.0)
         self.assertFalse(hasattr(config, "partial_rotary_factor"))
 
-        rope_fn = ROPE_INIT_FUNCTIONS["default"]
+        rope_fn = LlamaRotaryEmbedding.compute_default_rope_parameters
         default_inv_freq, _ = rope_fn(config=config, device=torch_device)
 
         # Check 1: this is a dynamic scaling strategy, it will not scale unless we provide `seq_len` larger than the
         # model's original training sequence length
         rope_fn = ROPE_INIT_FUNCTIONS["dynamic"]
         for factor in (2.0, 10.0, 20.0):
-            config.rope_scaling = {"rope_type": "dynamic", "factor": factor}
+            config.rope_parameters = {"rope_type": "dynamic", "rope_theta": 10000.0, "factor": factor}
             inv_freq, attention_scale = rope_fn(config=config, device=torch_device)
             self.assertEqual(attention_scale, 1.0)  # attention scale is always 1 for dynamic RoPE
             torch.testing.assert_close(inv_freq, default_inv_freq)
@@ -221,10 +281,13 @@ class RopeTest(unittest.TestCase):
             inv_freq, _ = rope_fn(config=config, device=torch_device, seq_len=1)
             torch.testing.assert_close(inv_freq, default_inv_freq)
 
+            inv_freq, _ = rope_fn(config=config, device=torch_device, seq_len=torch.tensor(1, dtype=torch.int64))
+            torch.testing.assert_close(inv_freq, default_inv_freq)
+
         # Check 2: if we provide `seq_len` larger than the model's original training sequence length, the frequencies
         # will scale up (i.e., the inverse frequencies will scale down).
         factor = 10.0
-        config.rope_scaling = {"rope_type": "dynamic", "factor": factor}
+        config.rope_parameters = {"rope_type": "dynamic", "rope_theta": 10000.0, "factor": factor}
         inv_freq, _ = rope_fn(config=config, device=torch_device, seq_len=16384)
         with self.assertRaises(AssertionError):  # It is NOT a linear factor
             torch.testing.assert_close(inv_freq, default_inv_freq / factor)
@@ -251,24 +314,28 @@ class RopeTest(unittest.TestCase):
 
         # input sanity checks: if these change, the output will also change
         config = LlamaConfig()
-        self.assertEqual(config.rope_scaling, None)
+        self.assertEqual(config.rope_parameters, {"rope_type": "default", "rope_theta": 10000.0})
         self.assertEqual(config.hidden_size, 4096)
         self.assertEqual(config.num_attention_heads, 32)
-        self.assertEqual(config.rope_theta, 10000.0)
         self.assertFalse(hasattr(config, "partial_rotary_factor"))
 
-        rope_fn = ROPE_INIT_FUNCTIONS["default"]
+        rope_fn = LlamaRotaryEmbedding.compute_default_rope_parameters
         default_inv_freq, _ = rope_fn(config=config, device=torch_device)
 
         # Check 1: according to the paper, if `attention_factor` is not specified, then it has a specific default --
         # `0.1 * math.log(factor) + 1.0`
         rope_fn = ROPE_INIT_FUNCTIONS["yarn"]
         for factor in (2.0, 10.0, 20.0):
-            config.rope_scaling = {"rope_type": "yarn", "factor": factor}
+            config.rope_parameters = {"rope_type": "yarn", "rope_theta": 10000.0, "factor": factor}
             _, attention_scale = rope_fn(config=config, device=torch_device)
             self.assertEqual(attention_scale, 0.1 * math.log(factor) + 1.0)
 
-            config.rope_scaling = {"rope_type": "yarn", "factor": factor, "attention_factor": 0.5}
+            config.rope_parameters = {
+                "rope_type": "yarn",
+                "rope_theta": 10000.0,
+                "factor": factor,
+                "attention_factor": 0.5,
+            }
             _, attention_scale = rope_fn(config=config, device=torch_device, seq_len=1)
             self.assertEqual(attention_scale, 0.5)
 
@@ -278,7 +345,13 @@ class RopeTest(unittest.TestCase):
         # (note: adds a margin to the test for numerical stability)
         factor = 10.0
         margin = 1e-8
-        config.rope_scaling = {"rope_type": "yarn", "factor": factor, "beta_fast": 32, "beta_slow": 1}
+        config.rope_parameters = {
+            "rope_type": "yarn",
+            "rope_theta": 10000.0,
+            "factor": factor,
+            "beta_fast": 32,
+            "beta_slow": 1,
+        }
         inv_freq, _ = rope_fn(config=config, device=torch_device)
         is_bounded_by_factor = [
             ((default_inv_freq[idx] / factor) - margin) <= yarn_inv_freq_value <= (default_inv_freq[idx] + margin)
@@ -288,7 +361,13 @@ class RopeTest(unittest.TestCase):
 
         # super high beta_fast = interpolation (i.e. scaling) in all but the first inverse frequency. The last ~20
         # values (empirically checked for `beta_fast` = 1000) should be very small to linear scaling
-        config.rope_scaling = {"rope_type": "yarn", "factor": factor, "beta_fast": 1000, "beta_slow": 1}
+        config.rope_parameters = {
+            "rope_type": "yarn",
+            "rope_theta": 10000.0,
+            "factor": factor,
+            "beta_fast": 1000,
+            "beta_slow": 1,
+        }
         inv_freq, _ = rope_fn(config=config, device=torch_device)
         is_interpolating = [
             yarn_inv_freq_value < (default_inv_freq[idx] + margin) for idx, yarn_inv_freq_value in enumerate(inv_freq)
@@ -298,17 +377,22 @@ class RopeTest(unittest.TestCase):
         torch.testing.assert_close(inv_freq[-20:], default_inv_freq[-20:] / factor)
 
         # Check 3: numerical snapshot to avoid regressions
-        config.rope_scaling = {"rope_type": "yarn", "factor": factor, "beta_fast": 32, "beta_slow": 1}
+        config.rope_parameters = {
+            "rope_type": "yarn",
+            "rope_theta": 10000.0,
+            "factor": factor,
+            "beta_fast": 32,
+            "beta_slow": 1,
+        }
         inv_freq, _ = rope_fn(config=config, device=torch_device)
         torch.testing.assert_close(inv_freq, EXPECTED_INV_FREQ)
 
     def test_longrope_rope_numerically(self):
         # input sanity checks: if these change, the output will also change
         config = LlamaConfig()
-        self.assertEqual(config.rope_scaling, None)
+        self.assertEqual(config.rope_parameters, {"rope_type": "default", "rope_theta": 10000.0})
         self.assertEqual(config.hidden_size, 4096)
         self.assertEqual(config.num_attention_heads, 32)
-        self.assertEqual(config.rope_theta, 10000.0)
         self.assertFalse(hasattr(config, "partial_rotary_factor"))
 
         # longrope applies scaling on EACH inv frequency, `short_factor` or `long_factor`, depending on the seq_len
@@ -316,25 +400,28 @@ class RopeTest(unittest.TestCase):
         short_factor = [2.0] * (dim // 2)  # scaling applied when seq_len <= max_position_embeddings
         long_factor = torch.ones(dim // 2).cumsum(0).tolist()  # scaling applied when seq_len > max_position_embeddings
 
-        rope_fn = ROPE_INIT_FUNCTIONS["default"]
+        rope_fn = LlamaRotaryEmbedding.compute_default_rope_parameters
         default_inv_freq, _ = rope_fn(config=config, device=torch_device)
 
         # Check 1: according to the paper, if `attention_factor` is not specified, then it has a specific default --
-        # `math.sqrt(1 + math.log(factor) / math.log(max_position_embeddings))`
+        # `math.sqrt(1 + math.log(factor) / math.log(original_max_position_embeddings))`
         rope_fn = ROPE_INIT_FUNCTIONS["longrope"]
-        max_position_embeddings = config.max_position_embeddings
         for factor in (2.0, 10.0, 20.0):
-            config.rope_scaling = {
+            config.rope_parameters = {
                 "rope_type": "longrope",
+                "rope_theta": 10000.0,
                 "factor": factor,
                 "short_factor": short_factor,
                 "long_factor": long_factor,
             }
             _, attention_scale = rope_fn(config=config, device=torch_device)
-            self.assertEqual(attention_scale, math.sqrt(1 + math.log(factor) / math.log(max_position_embeddings)))
+            self.assertEqual(
+                attention_scale, math.sqrt(1 + math.log(factor) / math.log(config.max_position_embeddings))
+            )
 
-            config.rope_scaling = {
+            config.rope_parameters = {
                 "rope_type": "longrope",
+                "rope_theta": 10000.0,
                 "factor": factor,
                 "short_factor": short_factor,
                 "long_factor": long_factor,
@@ -343,19 +430,22 @@ class RopeTest(unittest.TestCase):
             _, attention_scale = rope_fn(config=config, device=torch_device, seq_len=1)
             self.assertEqual(attention_scale, 0.5)
 
-            config.rope_scaling = {
+            config.rope_parameters = {
                 "rope_type": "longrope",
+                "rope_theta": 10000.0,
                 "factor": factor,
                 "short_factor": short_factor,
                 "long_factor": long_factor,
             }
-            self.assertEqual(config.rope_scaling.get("attention_factor"), None)
+            self.assertEqual(config.rope_parameters.get("attention_factor"), None)
             # Verify that "TypeError: '<' not supported between instances of 'NoneType' and 'int'" is not raised.
-            rope_config_validation(config)
+            config.standardize_rope_params()
+            config.validate_rope()
 
         # Check 2: seq_len == 0 -> short factor is applied to the default frequencies
-        config.rope_scaling = {
+        config.rope_parameters = {
             "rope_type": "longrope",
+            "rope_theta": 10000.0,
             "factor": 1.0,
             "short_factor": short_factor,
             "long_factor": long_factor,
@@ -388,20 +478,20 @@ class RopeTest(unittest.TestCase):
 
         # input sanity checks: if these change, the output will also change
         config = LlamaConfig()
-        self.assertEqual(config.rope_scaling, None)
+        self.assertEqual(config.rope_parameters, {"rope_type": "default", "rope_theta": 10000.0})
         self.assertEqual(config.hidden_size, 4096)
         self.assertEqual(config.num_attention_heads, 32)
-        self.assertEqual(config.rope_theta, 10000.0)
         self.assertFalse(hasattr(config, "partial_rotary_factor"))
 
-        rope_fn = ROPE_INIT_FUNCTIONS["default"]
+        rope_fn = LlamaRotaryEmbedding.compute_default_rope_parameters
         default_inv_freq, _ = rope_fn(config=config, device=torch_device)
 
         # Check 1: `attention_factor` is always 1
         rope_fn = ROPE_INIT_FUNCTIONS["llama3"]
         for factor in (2.0, 10.0, 20.0):
-            config.rope_scaling = {
+            config.rope_parameters = {
                 "rope_type": "llama3",
+                "rope_theta": 10000.0,
                 "factor": factor,
                 "original_max_position_embeddings": 2048,
                 "low_freq_factor": 1,
@@ -415,8 +505,9 @@ class RopeTest(unittest.TestCase):
         # frequencies are scaled by a value in between. Changing `low_freq_factor` and `high_freq_factor` changes what
         # is considered low, medium, and high frequencies.
         factor = 10.0
-        config.rope_scaling = {
+        config.rope_parameters = {
             "rope_type": "llama3",
+            "rope_theta": 10000.0,
             "factor": factor,
             "original_max_position_embeddings": 2048,
             "low_freq_factor": 1,
@@ -431,8 +522,9 @@ class RopeTest(unittest.TestCase):
 
         # if we change `high_freq_factor` to a very high value, none is considered high-frequency -> ALL values will be
         # scaled
-        config.rope_scaling = config.rope_scaling = {
+        config.rope_parameters = config.rope_parameters = {
             "rope_type": "llama3",
+            "rope_theta": 10000.0,
             "factor": factor,
             "original_max_position_embeddings": 2048,
             "low_freq_factor": 1,
@@ -443,12 +535,146 @@ class RopeTest(unittest.TestCase):
         self.assertTrue(all(is_scaled))
 
         # Check 3: numerical snapshot to avoid regressions
-        config.rope_scaling = {
+        config.rope_parameters = {
             "rope_type": "llama3",
+            "rope_theta": 10000.0,
             "factor": factor,
             "original_max_position_embeddings": 2048,
             "low_freq_factor": 1,
             "high_freq_factor": 4,
+        }
+        inv_freq, _ = rope_fn(config=config, device=torch_device)
+        torch.testing.assert_close(inv_freq, EXPECTED_INV_FREQ)
+
+    def test_proportional_rope_numerically(self):
+        # fmt: off
+        EXPECTED_INV_FREQ = torch.tensor(
+            [
+                1.0000e+00, 8.6596e-01, 7.4989e-01, 6.4938e-01, 5.6234e-01, 4.8697e-01,
+                4.2170e-01, 3.6517e-01, 3.1623e-01, 2.7384e-01, 2.3714e-01, 2.0535e-01,
+                1.7783e-01, 1.5399e-01, 1.3335e-01, 1.1548e-01, 0.0000e+00, 0.0000e+00,
+                0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00,
+                0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00,
+                0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00,
+                0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00,
+                0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00,
+                0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00,
+                0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00,
+                0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00
+            ], device=torch_device
+        )
+        # fmt: on
+
+        # input sanity checks: if these change, the output will also change
+        config = LlamaConfig()
+        self.assertEqual(config.rope_parameters, {"rope_type": "default", "rope_theta": 10000.0})
+        self.assertEqual(config.hidden_size, 4096)
+        self.assertEqual(config.num_attention_heads, 32)
+        self.assertFalse(hasattr(config, "partial_rotary_factor"))
+
+        head_dim = config.hidden_size // config.num_attention_heads  # 128
+
+        rope_fn = ROPE_INIT_FUNCTIONS["proportional"]
+        default_rope_fn = LlamaRotaryEmbedding.compute_default_rope_parameters
+
+        # Check 1: `attention_factor` is always 1.0, regardless of parameters
+        for partial_rotary_factor in (1.0, 0.5, 0.25):
+            config.rope_parameters = {
+                "rope_type": "proportional",
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": partial_rotary_factor,
+            }
+            _, attention_scale = rope_fn(config=config, device=torch_device)
+            self.assertEqual(attention_scale, 1.0)
+
+        # Check 2: output shape is always head_dim // 2, regardless of partial_rotary_factor
+        for partial_rotary_factor in (1.0, 0.5, 0.25):
+            config.rope_parameters = {
+                "rope_type": "proportional",
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": partial_rotary_factor,
+            }
+            inv_freq, _ = rope_fn(config=config, device=torch_device)
+            self.assertEqual(inv_freq.shape[0], head_dim // 2)
+
+        # Check 3: zero-padding behavior — when partial_rotary_factor < 1.0, the last (head_dim // 2 - rope_angles)
+        # entries must be exactly zero, and the first rope_angles entries must be non-zero
+        for partial_rotary_factor, expected_rope_angles in ((0.5, 32), (0.25, 16)):
+            config.rope_parameters = {
+                "rope_type": "proportional",
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": partial_rotary_factor,
+            }
+            inv_freq, _ = rope_fn(config=config, device=torch_device)
+
+            # First rope_angles entries should be non-zero (rotated frequencies)
+            self.assertTrue(torch.all(inv_freq[:expected_rope_angles] != 0))
+            # Remaining entries should be exactly zero (NoPE angles)
+            expected_nope_angles = head_dim // 2 - expected_rope_angles
+            torch.testing.assert_close(
+                inv_freq[expected_rope_angles:],
+                torch.zeros(expected_nope_angles, device=torch_device),
+            )
+
+        # When partial_rotary_factor = 1.0, no entries should be zero
+        config.rope_parameters = {
+            "rope_type": "proportional",
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 1.0,
+        }
+        inv_freq, _ = rope_fn(config=config, device=torch_device)
+        self.assertTrue(torch.all(inv_freq != 0))
+
+        # Check 4: factor scaling equivalences with default and linear RoPE
+        # 4a: With partial_rotary_factor=1.0 and factor=1.0, proportional RoPE == default RoPE
+        config.rope_parameters = {
+            "rope_type": "proportional",
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 1.0,
+            "factor": 1.0,
+        }
+        inv_freq_prop, _ = rope_fn(config=config, device=torch_device)
+        config.rope_parameters = {"rope_type": "default", "rope_theta": 10000.0}
+        default_inv_freq, _ = default_rope_fn(config=config, device=torch_device)
+        torch.testing.assert_close(inv_freq_prop, default_inv_freq)
+
+        # 4b: With partial_rotary_factor=1.0 and factor=2.0, proportional RoPE == linear RoPE
+        linear_rope_fn = ROPE_INIT_FUNCTIONS["linear"]
+        for factor in (2.0, 10.0):
+            config.rope_parameters = {
+                "rope_type": "proportional",
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": 1.0,
+                "factor": factor,
+            }
+            inv_freq_prop, _ = rope_fn(config=config, device=torch_device)
+            config.rope_parameters = {"rope_type": "linear", "rope_theta": 10000.0, "factor": factor}
+            inv_freq_linear, _ = linear_rope_fn(config=config, device=torch_device)
+            torch.testing.assert_close(inv_freq_prop, inv_freq_linear)
+
+        # 4c: With partial_rotary_factor=0.5 and factor=2.0, the non-zero portion should be the rotated subspace
+        # frequencies divided by factor
+        config.rope_parameters = {
+            "rope_type": "proportional",
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.5,
+            "factor": 2.0,
+        }
+        inv_freq_scaled, _ = rope_fn(config=config, device=torch_device)
+        config.rope_parameters = {
+            "rope_type": "proportional",
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.5,
+            "factor": 1.0,
+        }
+        inv_freq_unscaled, _ = rope_fn(config=config, device=torch_device)
+        torch.testing.assert_close(inv_freq_scaled, inv_freq_unscaled / 2.0)
+
+        # Check 5: numerical snapshot to avoid regressions (partial_rotary_factor=0.25, factor=1.0)
+        config.rope_parameters = {
+            "rope_type": "proportional",
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.25,
         }
         inv_freq, _ = rope_fn(config=config, device=torch_device)
         torch.testing.assert_close(inv_freq, EXPECTED_INV_FREQ)
