@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024, The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,7 +27,6 @@ from transformers import (
 )
 from transformers.testing_utils import (
     cleanup,
-    require_read_token,
     require_torch_accelerator,
     slow,
     torch_device,
@@ -142,8 +140,7 @@ class CsmModelTester:
 
 class CsmForConditionalGenerationTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
     all_model_classes = (CsmForConditionalGeneration,) if is_torch_available() else ()
-    test_pruning = False
-    test_headmasking = False
+
     test_resize_embeddings = False
     test_resize_embeddings_untied = False
 
@@ -266,10 +263,6 @@ class CsmForConditionalGenerationTest(ModelTesterMixin, GenerationTesterMixin, u
     def test_model_get_set_embeddings(self):
         pass
 
-    @pytest.mark.skip(reason="CSM has custom embedding approach (text and audio embeddings).")
-    def test_tie_model_weights(self):
-        pass
-
     @pytest.mark.generate
     @unittest.skip(reason="CSM does not support beam search.")
     def test_generate_from_inputs_embeds_1_beam_search(self, _, num_beams):
@@ -282,6 +275,15 @@ class CsmForConditionalGenerationTest(ModelTesterMixin, GenerationTesterMixin, u
 
     @unittest.skip(reason="CSM has special embeddings that can never be tied")
     def test_tied_weights_keys(self):
+        pass
+
+    @unittest.skip(reason="CSM has no separate base model without a head.")
+    def test_model_base_model_prefix(self):
+        pass
+
+    @parameterized.expand([("linear",), ("dynamic",), ("yarn",)])
+    @unittest.skip(reason="CSM doesn't return last hidden states")
+    def test_model_rope_scaling_from_config(self, scaling_type):
         pass
 
     def _get_custom_4d_mask_test_data(self):
@@ -322,7 +324,6 @@ class CsmForConditionalGenerationTest(ModelTesterMixin, GenerationTesterMixin, u
         return input_ids, position_ids, input_ids_shared_prefix, mask_shared_prefix, position_ids_shared_prefix
 
 
-@require_read_token
 class CsmForConditionalGenerationIntegrationTest(unittest.TestCase):
     def setUp(self):
         # TODO: @eustlb, update with correct sesame's repo

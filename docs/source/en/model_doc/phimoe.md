@@ -13,12 +13,11 @@ specific language governing permissions and limitations under the License.
 rendered properly in your Markdown viewer.
 
 -->
-*This model was released on 2024-04-22 and added to Hugging Face Transformers on 2024-10-04.*
+*This model was published in HF papers on 2024-04-22 and contributed to Hugging Face Transformers on 2024-10-04.*
 
 # PhiMoE
 
 <div class="flex flex-wrap space-x-1">
-<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
 <img alt="FlashAttention" src="https://img.shields.io/badge/%E2%9A%A1%EF%B8%8E%20FlashAttention-eae0c8?style=flat">
 <img alt="SDPA" src="https://img.shields.io/badge/SDPA-DE3412?style=flat&logo=pytorch&logoColor=white">
 </div>
@@ -69,8 +68,7 @@ torch.random.manual_seed(0)
 
 model = AutoModelForCausalLM.from_pretrained( 
     "microsoft/Phi-3.5-MoE-instruct",  
-    device_map="auto",  
-    dtype="auto",
+    device_map="auto",  ,
 ) 
 
 tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3.5-MoE-instruct") 
@@ -103,9 +101,6 @@ print(output[0]['generated_text'])
 
 [[autodoc]] PhimoeConfig
 
-<frameworkcontent>
-<pt>
-
 ## PhimoeModel
 
 [[autodoc]] PhimoeModel
@@ -121,6 +116,3 @@ print(output[0]['generated_text'])
 
 [[autodoc]] PhimoeForSequenceClassification
     - forward
-
-</pt>
-</frameworkcontent>

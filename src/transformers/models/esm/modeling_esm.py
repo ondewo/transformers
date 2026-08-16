@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2022 Meta and The HuggingFace Inc. team. All rights reserved.
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
@@ -16,12 +15,15 @@
 """PyTorch ESM model."""
 
 import math
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
+from ... import initialization as init
+from ...integrations import use_kernel_forward_from_hub, use_kernelized_func
+from ...masking_utils import create_bidirectional_mask, create_causal_mask
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import (
     BaseModelOutputWithCrossAttentions,
@@ -30,11 +32,13 @@ from ...modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
+from ...modeling_rope_utils import dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
-from ...pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
-from ...utils.generic import OutputRecorder, check_model_inputs
+from ...utils.deprecation import deprecate_kwarg
+from ...utils.generic import maybe_autocast, merge_with_config_defaults
+from ...utils.output_capturing import OutputRecorder, capture_outputs
 from .configuration_esm import EsmConfig
 
 
@@ -42,15 +46,37 @@ logger = logging.get_logger(__name__)
 
 
 def rotate_half(x):
-    x1, x2 = x.chunk(2, dim=-1)
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(x, cos, sin):
-    cos = cos[:, :, : x.shape[-2], :]
-    sin = sin[:, :, : x.shape[-2], :]
+@use_kernel_forward_from_hub("rotary_pos_emb")
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors.
 
-    return (x * cos) + (rotate_half(x) * sin)
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    original_dtype = q.dtype
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q.float() * cos) + (rotate_half(q.float()) * sin)
+    k_embed = (k.float() * cos) + (rotate_half(k.float()) * sin)
+    return q_embed.to(original_dtype), k_embed.to(original_dtype)
 
 
 def gelu(x):
@@ -77,48 +103,61 @@ def average_product_correct(x):
     return normalized
 
 
-class RotaryEmbedding(torch.nn.Module):
+class EsmRotaryEmbedding(nn.Module):
     """
-    Rotary position embeddings based on those in
-    [RoFormer](https://huggingface.co/docs/transformers/model_doc/roformer). Query and keys are transformed by rotation
-    matrices which depend on their relative positions.
+    Rotary position embeddings.
+    Implementation based on [ModernBERT's RotaryEmbedding](https://github.com/huggingface/transformers/blob/aad13b87ed59f2afcfaebc985f403301887a35fc/src/transformers/models/modernbert/modeling_modernbert.py#L94).
     """
 
-    inv_freq: torch.Tensor  # fix linting for `register_buffer`
-
-    def __init__(self, dim: int):
+    @deprecate_kwarg("device", version="5.18")
+    def __init__(self, config: EsmConfig, device=None):
         super().__init__()
-        # Generate and save the inverse frequency buffer (non trainable)
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
 
-        self._seq_len_cached = None
-        self._cos_cached = None
-        self._sin_cached = None
+        self.config = config
+        self.rope_type = {}
 
-    def _update_cos_sin_tables(self, x, seq_dimension=2):
-        seq_len = x.shape[seq_dimension]
+        curr_inv_freq, curr_attention_scaling = self.compute_default_rope_parameters(self.config)
+        self.inv_freq = nn.Buffer(curr_inv_freq)
+        setattr(self, "attention_scaling", curr_attention_scaling)
 
-        # Reset the tables if the sequence length has changed,
-        # or if we're on a new device (possibly due to tracing for instance)
-        if seq_len != self._seq_len_cached or self._cos_cached.device != x.device:
-            self._seq_len_cached = seq_len
-            t = torch.arange(x.shape[seq_dimension], device=x.device).type_as(self.inv_freq)
-            freqs = torch.outer(t, self.inv_freq)
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+    @staticmethod
+    @deprecate_kwarg("device", version="5.18")
+    def compute_default_rope_parameters(config: EsmConfig, device=None, **kwargs) -> tuple[torch.Tensor, float]:
+        """
+        Computes the inverse frequencies according to the original RoPE implementation
+        Args:
+            config ([`~transformers.PreTrainedConfig`]):
+                The model configuration.
 
-            self._cos_cached = emb.cos()[None, None, :, :]
-            self._sin_cached = emb.sin()[None, None, :, :]
+        Returns:
+            Tuple of (`torch.Tensor`, `float`), containing the inverse frequencies for the RoPE embeddings and the
+            post-processing scaling factor applied to the computed cos/sin (unused in this type of RoPE).
+        """
+        base = config.rope_theta
+        dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
 
-        return self._cos_cached, self._sin_cached
+        attention_factor = 1.0  # Unused in this type of RoPE
+        # Compute the inverse frequencies
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        return inv_freq.to(device), attention_factor
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        self._cos_cached, self._sin_cached = self._update_cos_sin_tables(k, seq_dimension=-2)
+    @torch.no_grad()
+    @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
+    def forward(self, x, position_ids, layer_type=None):
+        inv_freq = getattr(self, "inv_freq")
+        attention_scaling = getattr(self, "attention_scaling")
 
-        return (
-            apply_rotary_pos_emb(q, self._cos_cached, self._sin_cached).to(dtype=q.dtype),
-            apply_rotary_pos_emb(k, self._cos_cached, self._sin_cached).to(dtype=k.dtype),
-        )
+        inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
+        position_ids_expanded = position_ids[:, None, :].float()
+
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        with maybe_autocast(device_type=device_type, enabled=False):  # Force float32
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * attention_scaling
+            sin = emb.sin() * attention_scaling
+
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 class EsmContactPredictionHead(nn.Module):
@@ -172,9 +211,7 @@ class EsmEmbeddings(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
-        self.register_buffer(
-            "position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)), persistent=False
-        )
+        self.position_ids = nn.Buffer(torch.arange(config.max_position_embeddings).expand((1, -1)), persistent=False)
 
         self.padding_idx = config.pad_token_id
         if self.position_embedding_type == "absolute":
@@ -251,49 +288,28 @@ class EsmEmbeddings(nn.Module):
         return position_ids.unsqueeze(0).expand(input_shape)
 
 
+# Copied from transformers.models.bert.modeling_bert.eager_attention_forward
 def eager_attention_forward(
     module: nn.Module,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    scaling: float,
+    attention_mask: torch.Tensor | None,
+    scaling: float | None = None,
     dropout: float = 0.0,
-    head_mask: Optional[torch.Tensor] = None,
     **kwargs: Unpack[TransformersKwargs],
 ):
-    # ESM applies relative position embeddings and we don't copy from Llama
+    if scaling is None:
+        scaling = query.size(-1) ** -0.5
+
+    # Take the dot product between "query" and "key" to get the raw attention scores.
     attn_weights = torch.matmul(query, key.transpose(2, 3)) * scaling
 
-    if hasattr(module, "position_embedding_type") and module.position_embedding_type in [
-        "relative_key",
-        "relative_key_query",
-    ]:
-        seq_length = query.shape[2]
-        position_ids_l = torch.arange(seq_length, dtype=torch.long, device=attn_weights.device).view(-1, 1)
-        position_ids_r = torch.arange(seq_length, dtype=torch.long, device=attn_weights.device).view(1, -1)
-        distance = position_ids_l - position_ids_r
-        positional_embedding = module.distance_embedding(distance + module.max_position_embeddings - 1)
-        positional_embedding = positional_embedding.to(dtype=query.dtype)  # fp16 compatibility
-
-        if module.position_embedding_type == "relative_key":
-            relative_position_scores = torch.einsum("bhld,lrd->bhlr", query, positional_embedding)
-        elif module.position_embedding_type == "relative_key_query":
-            relative_position_scores_query = torch.einsum("bhld,lrd->bhlr", query, positional_embedding)
-            relative_position_scores_key = torch.einsum("bhrd,lrd->bhlr", key, positional_embedding)
-            relative_position_scores = relative_position_scores_query + relative_position_scores_key
-
-        attn_weights = attn_weights + relative_position_scores
-
     if attention_mask is not None:
-        causal_mask = attention_mask[:, :, :, : key.shape[-2]]
-        attn_weights = attn_weights + causal_mask
+        attn_weights = attn_weights + attention_mask
 
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1)
     attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-
-    if head_mask is not None:
-        attn_weights = attn_weights * head_mask
 
     attn_output = torch.matmul(attn_weights, value)
     attn_output = attn_output.transpose(1, 2).contiguous()
@@ -301,6 +317,7 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
+@use_kernelized_func(apply_rotary_pos_emb)
 class EsmSelfAttention(nn.Module):
     def __init__(self, config, position_embedding_type=None, layer_idx=None, is_cross_attention=False):
         super().__init__()
@@ -321,16 +338,10 @@ class EsmSelfAttention(nn.Module):
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = config.attention_probs_dropout_prob
+
         self.position_embedding_type = position_embedding_type or getattr(
             config, "position_embedding_type", "absolute"
         )
-        self.rotary_embeddings = None
-        if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
-            self.max_position_embeddings = config.max_position_embeddings
-            self.distance_embedding = nn.Embedding(2 * config.max_position_embeddings - 1, self.attention_head_size)
-        elif self.position_embedding_type == "rotary":
-            self.rotary_embeddings = RotaryEmbedding(dim=self.attention_head_size)
-
         self.scaling = 1.0  # For BC we apply scaling before RoPE
         self.is_decoder = config.is_decoder
         self.layer_idx = layer_idx
@@ -339,14 +350,14 @@ class EsmSelfAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        attention_mask: torch.FloatTensor | None = None,
+        encoder_hidden_states: torch.FloatTensor | None = None,
+        encoder_attention_mask: torch.FloatTensor | None = None,
+        position_embeddings: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor]:
-        batch_size, seq_length = hidden_states.shape[:-1]
-        hidden_shape = (batch_size, seq_length, -1, self.attention_head_size)
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.attention_head_size)
 
         query_layer = self.query(hidden_states).view(hidden_shape).transpose(1, 2)
 
@@ -363,16 +374,12 @@ class EsmSelfAttention(nn.Module):
         query_layer = query_layer * self.attention_head_size**-0.5
 
         if self.position_embedding_type == "rotary":
-            query_layer, key_layer = self.rotary_embeddings(query_layer, key_layer)
+            cos, sin = position_embeddings
+            query_layer, key_layer = apply_rotary_pos_emb(query_layer, key_layer, cos, sin, unsqueeze_dim=1)
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            if self.position_embedding_type in ["relative_key", "relative_key_query"]:
-                raise ValueError(
-                    f"ESM {self.config._attn_implementation} attention does not support {self.position_embedding_type} embeddings. "
-                    "Set attention explicitly to 'eager' with `model.set_attn_implementation('eager')`"
-                )
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -382,11 +389,10 @@ class EsmSelfAttention(nn.Module):
             attention_mask,
             dropout=0.0 if not self.training else self.dropout,
             scaling=self.scaling,
-            head_mask=head_mask,
             **kwargs,
         )
 
-        attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         return attn_output, attn_weights
 
 
@@ -408,43 +414,25 @@ class EsmAttention(nn.Module):
         super().__init__()
         self.self = EsmSelfAttention(config, layer_idx=layer_idx, is_cross_attention=is_cross_attention)
         self.output = EsmSelfOutput(config)
-        self.pruned_heads = set()
+
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-
-    def prune_heads(self, heads):
-        if len(heads) == 0:
-            return
-        heads, index = find_pruneable_heads_and_indices(
-            heads, self.self.num_attention_heads, self.self.attention_head_size, self.pruned_heads
-        )
-
-        # Prune linear layers
-        self.self.query = prune_linear_layer(self.self.query, index)
-        self.self.key = prune_linear_layer(self.self.key, index)
-        self.self.value = prune_linear_layer(self.self.value, index)
-        self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
-
-        # Update hyper params and store pruned heads
-        self.self.num_attention_heads = self.self.num_attention_heads - len(heads)
-        self.self.all_head_size = self.self.attention_head_size * self.self.num_attention_heads
-        self.pruned_heads = self.pruned_heads.union(heads)
 
     def forward(
         self,
         hidden_states,
         attention_mask=None,
-        head_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
+        position_embeddings: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ):
         hidden_states_ln = self.LayerNorm(hidden_states)
         attn_output, _ = self.self(
             hidden_states_ln,
             attention_mask=attention_mask,
-            head_mask=head_mask,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
+            position_embeddings=position_embeddings,
             **kwargs,
         )
         attn_output = self.output(attn_output, hidden_states)
@@ -495,15 +483,15 @@ class EsmLayer(GradientCheckpointingLayer):
         self,
         hidden_states,
         attention_mask=None,
-        head_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
+        position_embeddings: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ):
         attention_output = self.attention(
             hidden_states,
             attention_mask=attention_mask,
-            head_mask=head_mask,
+            position_embeddings=position_embeddings,
             **kwargs,
         )
 
@@ -517,9 +505,9 @@ class EsmLayer(GradientCheckpointingLayer):
             attention_output = self.crossattention(
                 attention_output,
                 attention_mask=attention_mask,
-                head_mask=head_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
+                position_embeddings=position_embeddings,
                 **kwargs,
             )
 
@@ -546,19 +534,18 @@ class EsmEncoder(nn.Module):
         self,
         hidden_states,
         attention_mask=None,
-        head_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
+        position_embeddings: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ):
         for i, layer_module in enumerate(self.layer):
-            layer_head_mask = head_mask[i] if head_mask is not None else None
             hidden_states = layer_module(
                 hidden_states,
                 attention_mask=attention_mask,
-                head_mask=layer_head_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
+                position_embeddings=position_embeddings,
                 **kwargs,
             )
 
@@ -605,24 +592,17 @@ class EsmPreTrainedModel(PreTrainedModel):
         ],
     }
 
-    # Copied from transformers.models.bert.modeling_bert.BertPreTrainedModel._init_weights with BertLMPredictionHead->EsmLMHead
+    @torch.no_grad()
     def _init_weights(self, module):
         """Initialize the weights"""
-        if isinstance(module, nn.Linear):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-        elif isinstance(module, EsmLMHead):
-            module.bias.data.zero_()
+        super()._init_weights(module)
+        if isinstance(module, EsmLMHead):
+            init.zeros_(module.bias)
+        elif isinstance(module, EsmEmbeddings):
+            init.copy_(module.position_ids, torch.arange(module.position_ids.shape[-1]).expand((1, -1)))
+        elif isinstance(module, EsmRotaryEmbedding):
+            curr_inv_freq, _ = module.compute_default_rope_parameters(module.config)
+            init.copy_(getattr(module, "inv_freq"), curr_inv_freq)
 
     def get_output_embeddings(self):
         # NOTE: get_output_embeddings() must return None to prevent accidental weight tying.
@@ -653,6 +633,12 @@ class EsmModel(EsmPreTrainedModel):
         self.config = config
 
         self.embeddings = EsmEmbeddings(config)
+
+        self.rotary_embeddings = None
+        self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+        if self.position_embedding_type == "rotary":
+            self.rotary_embeddings = EsmRotaryEmbedding(config=config)
+
         self.encoder = EsmEncoder(config)
 
         self.pooler = EsmPooler(config) if add_pooling_layer else None
@@ -661,8 +647,31 @@ class EsmModel(EsmPreTrainedModel):
             in_features=config.num_hidden_layers * config.num_attention_heads, bias=True
         )
 
+        self._register_load_state_dict_pre_hook(self.load_hook)
         # Initialize weights and apply final processing
         self.post_init()
+
+    def load_hook(self, state_dict, prefix, *args):
+        """Remap per-layer rotary inv_freq keys from old checkpoints to the new model-level location.
+
+        Old checkpoints stored inv_freq per attention layer at:
+            {prefix}encoder.layer.{i}.attention.self.rotary_embeddings.inv_freq
+        New code stores a single shared inv_freq at:
+            {prefix}rotary_embeddings.inv_freq
+        The old checkpoint values must be preserved (not recomputed) because they may
+        have been saved in float16, matching the precision used during training.
+        """
+        new_key = f"{prefix}rotary_embeddings.inv_freq"
+        if new_key not in state_dict:
+            old_keys = sorted(
+                k
+                for k in list(state_dict.keys())
+                if k.startswith(prefix) and k.endswith(".attention.self.rotary_embeddings.inv_freq")
+            )
+            if old_keys:
+                state_dict[new_key] = state_dict[old_keys[0]]
+            for k in old_keys:
+                del state_dict[k]
 
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings
@@ -670,27 +679,19 @@ class EsmModel(EsmPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embeddings.word_embeddings = value
 
-    def _prune_heads(self, heads_to_prune):
-        """
-        Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
-        class PreTrainedModel
-        """
-        for layer, heads in heads_to_prune.items():
-            self.encoder.layer[layer].attention.prune_heads(heads)
-
-    @check_model_inputs
+    @merge_with_config_defaults
+    @capture_outputs
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        encoder_hidden_states: torch.Tensor | None = None,
+        encoder_attention_mask: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> Union[tuple[torch.Tensor], BaseModelOutputWithPoolingAndCrossAttentions]:
+    ) -> tuple[torch.Tensor] | BaseModelOutputWithPoolingAndCrossAttentions:
         r"""
         input_ids (`torch.LongTensor` of shape `((batch_size, sequence_length))`):
             Indices of input sequence tokens in the vocabulary.
@@ -713,44 +714,36 @@ class EsmModel(EsmPreTrainedModel):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if inputs_embeds is None:
+            # Important, attention_mask must be passed to the embedding class
+            # This effects how the token_dropout is calculated
             inputs_embeds = self.embeddings(
                 input_ids=input_ids,
+                attention_mask=attention_mask,
                 position_ids=position_ids,
             )
 
-        if self.config._attn_implementation != "flash_attention_2":
-            batch_size, seq_length = inputs_embeds.shape[:-1]
-            if attention_mask is None:
-                attention_mask = torch.ones(((batch_size, seq_length)), device=inputs_embeds.device)
+        attention_mask, encoder_attention_mask = self._create_attention_masks(
+            attention_mask=attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
+            embedding_output=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            past_key_values=None,
+        )
 
-            attention_mask: torch.Tensor = self.get_extended_attention_mask(
-                attention_mask, input_shape=(batch_size, seq_length)
-            )
-
-        # If a 2D or 3D attention mask is provided for the cross-attention
-        # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
-        if self.config.is_decoder and encoder_hidden_states is not None:
-            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
-            encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-            if encoder_attention_mask is None:
-                encoder_attention_mask = torch.ones(encoder_hidden_shape, device=inputs_embeds.device)
-            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
+        if self.position_embedding_type == "rotary":
+            if position_ids is None:
+                seq_len = inputs_embeds.shape[1]
+                position_ids = torch.arange(seq_len, device=inputs_embeds.device).unsqueeze(0)
+            position_embeddings = self.rotary_embeddings(inputs_embeds, position_ids)
         else:
-            encoder_extended_attention_mask = None
-
-        # Prepare head mask if needed
-        # 1.0 in head_mask indicate we keep the head
-        # attention_probs has shape bsz x n_heads x N x N
-        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
-        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
-        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
+            position_embeddings = None
 
         encoder_outputs = self.encoder(
             inputs_embeds,
             attention_mask=attention_mask,
-            head_mask=head_mask,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_extended_attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
+            position_embeddings=position_embeddings,
             **kwargs,
         )
         sequence_output = encoder_outputs[0]
@@ -760,6 +753,39 @@ class EsmModel(EsmPreTrainedModel):
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
         )
+
+    # Copied from transformers.models.bert.modeling_bert.BertModel._create_attention_masks
+    def _create_attention_masks(
+        self,
+        attention_mask,
+        encoder_attention_mask,
+        embedding_output,
+        encoder_hidden_states,
+        past_key_values,
+    ):
+        if self.config.is_decoder:
+            attention_mask = create_causal_mask(
+                config=self.config,
+                inputs_embeds=embedding_output,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+            )
+        else:
+            attention_mask = create_bidirectional_mask(
+                config=self.config,
+                inputs_embeds=embedding_output,
+                attention_mask=attention_mask,
+            )
+
+        if encoder_attention_mask is not None:
+            encoder_attention_mask = create_bidirectional_mask(
+                config=self.config,
+                inputs_embeds=embedding_output,
+                attention_mask=encoder_attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+            )
+
+        return attention_mask, encoder_attention_mask
 
     def predict_contacts(self, tokens, attention_mask):
         attns = self(tokens, attention_mask=attention_mask, return_dict=True, output_attentions=True).attentions
@@ -775,7 +801,7 @@ class EsmModel(EsmPreTrainedModel):
 
 @auto_docstring
 class EsmForMaskedLM(EsmPreTrainedModel):
-    _tied_weights_keys = ["lm_head.decoder.weight"]
+    _tied_weights_keys = {"lm_head.decoder.weight": "esm.embeddings.word_embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -789,8 +815,6 @@ class EsmForMaskedLM(EsmPreTrainedModel):
         self.esm = EsmModel(config, add_pooling_layer=False)
         self.lm_head = EsmLMHead(config)
 
-        self.init_weights()
-
         self.post_init()
 
     def get_output_embeddings(self):
@@ -803,16 +827,15 @@ class EsmForMaskedLM(EsmPreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        encoder_hidden_states: torch.FloatTensor | None = None,
+        encoder_attention_mask: torch.Tensor | None = None,
+        labels: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> Union[tuple, MaskedLMOutput]:
+    ) -> tuple | MaskedLMOutput:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for computing the masked language modeling loss. Indices should be in `[-100, 0, ...,
@@ -824,7 +847,6 @@ class EsmForMaskedLM(EsmPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
@@ -887,22 +909,19 @@ class EsmForSequenceClassification(EsmPreTrainedModel):
         self.esm = EsmModel(config, add_pooling_layer=False)
         self.classifier = EsmClassificationHead(config)
 
-        self.init_weights()
-
         self.post_init()
 
     @can_return_tuple
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> Union[tuple, SequenceClassifierOutput]:
+    ) -> tuple | SequenceClassifierOutput:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
@@ -914,7 +933,6 @@ class EsmForSequenceClassification(EsmPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             **kwargs,
         )
@@ -964,22 +982,19 @@ class EsmForTokenClassification(EsmPreTrainedModel):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
-        self.init_weights()
-
         self.post_init()
 
     @can_return_tuple
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> Union[tuple, TokenClassifierOutput]:
+    ) -> tuple | TokenClassifierOutput:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for computing the token classification loss. Indices should be in `[0, ..., config.num_labels - 1]`.
@@ -989,7 +1004,6 @@ class EsmForTokenClassification(EsmPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             **kwargs,
         )

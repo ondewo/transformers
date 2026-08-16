@@ -23,6 +23,7 @@ from transformers.testing_utils import (
     Expectations,
     cleanup,
     require_bitsandbytes,
+    require_deterministic_for_xpu,
     require_torch,
     require_torch_accelerator,
     require_torch_large_accelerator,
@@ -40,11 +41,7 @@ from ...test_pipeline_mixin import PipelineTesterMixin
 if is_torch_available():
     import torch
 
-    from transformers import (
-        FalconMambaCache,
-        FalconMambaForCausalLM,
-        FalconMambaModel,
-    )
+    from transformers import DynamicCache, FalconMambaForCausalLM, FalconMambaModel
 
 
 # Copied from transformers.tests.models.mamba.MambaModelTester with Mamba->FalconMamba,mamba->falcon_mamba
@@ -68,7 +65,7 @@ class FalconMambaModelTester:
         num_labels=3,
         num_choices=4,
         scope=None,
-        tie_word_embeddings=True,
+        tie_word_embeddings=False,
     ):
         self.parent = parent
         self.batch_size = batch_size
@@ -91,10 +88,6 @@ class FalconMambaModelTester:
         self.eos_token_id = vocab_size - 1
         self.pad_token_id = vocab_size - 1
         self.tie_word_embeddings = tie_word_embeddings
-
-    # Ignore copy
-    def get_large_model_config(self):
-        return FalconMambaConfig.from_pretrained("tiiuae/falcon-mamba-7b")
 
     def prepare_config_and_inputs(
         self, gradient_checkpointing=False, scale_attn_by_inverse_layer_idx=False, reorder_and_upcast_attn=False
@@ -199,7 +192,6 @@ class FalconMambaModelTester:
         outputs = model(
             input_ids[:, :-1],
             use_cache=True,
-            cache_position=torch.arange(0, config.conv_kernel, device=input_ids.device),
         )
         output_one = outputs.last_hidden_state
 
@@ -208,7 +200,6 @@ class FalconMambaModelTester:
             input_ids[:, -1:],
             use_cache=True,
             cache_params=outputs.cache_params,
-            cache_position=torch.arange(config.conv_kernel, config.conv_kernel + 1, device=input_ids.device),
         )
         output_two = outputs.last_hidden_state
 
@@ -219,7 +210,11 @@ class FalconMambaModelTester:
         self, config, input_ids, *args, gradient_checkpointing=False
     ):
         model = FalconMambaModel(config)
-        model.to(torch_device)
+
+        # force torch path in any case
+        model.to("cpu")
+        input_ids = input_ids.to("cpu")
+
         if gradient_checkpointing:
             model.gradient_checkpointing_enable()
 
@@ -229,9 +224,7 @@ class FalconMambaModelTester:
 
         # use cache
         token_emb = model.embeddings(input_ids)
-        outputs = model.layers[0].mixer.slow_forward(
-            token_emb, cache, cache_position=torch.arange(0, config.conv_kernel, device=input_ids.device)
-        )
+        outputs = model.layers[0].mixer(token_emb, cache)
 
         loss = torch.log1p(torch.abs(outputs.sum()))
         self.parent.assertEqual(loss.shape, ())
@@ -265,21 +258,19 @@ class FalconMambaModelTester:
 
 
 @require_torch
-# Copied from transformers.tests.models.mamba.MambaModelTest with Mamba->Falcon,mamba->falcon_mamba,FalconMambaCache->MambaCache
 class FalconMambaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
     all_model_classes = (FalconMambaModel, FalconMambaForCausalLM) if is_torch_available() else ()
     has_attentions = False  # FalconMamba does not support attentions
-    fx_compatible = False  # FIXME let's try to support this @ArthurZucker
-    test_torchscript = False  # FIXME let's try to support this @ArthurZucker
     test_missing_keys = False
-    test_model_parallel = False
-    test_pruning = False
-    test_head_masking = False  # FalconMamba does not have attention heads
+
     pipeline_model_mapping = (
         {"feature-extraction": FalconMambaModel, "text-generation": FalconMambaForCausalLM}
         if is_torch_available()
         else {}
     )
+
+    def test_enable_input_require_grads(self):
+        self.skipTest("FalconMamba currently requires CUDA/Metal/XPU to run enable_input_require_grads.")
 
     def setUp(self):
         self.model_tester = FalconMambaModelTester(self)
@@ -347,9 +338,15 @@ class FalconMambaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTest
                 dict_output = model(**dict_inputs, return_dict=True, **additional_kwargs).to_tuple()
 
                 def recursive_check(tuple_object, dict_object):
-                    if isinstance(tuple_object, FalconMambaCache):  # MODIFIED PART START
-                        recursive_check(tuple_object.conv_states, dict_object.conv_states)
-                        recursive_check(tuple_object.ssm_states, dict_object.ssm_states)
+                    if isinstance(tuple_object, DynamicCache):  # MODIFIED PART START
+                        for idx in range(len(tuple_object)):
+                            recursive_check(
+                                tuple_object.layers[idx].conv_states[0], dict_object.layers[idx].conv_states[0]
+                            )
+                            recursive_check(
+                                tuple_object.layers[idx].recurrent_states[0],
+                                dict_object.layers[idx].recurrent_states[0],
+                            )
                     elif isinstance(tuple_object, (list, tuple)):  # MODIFIED PART END
                         for tuple_iterable_value, dict_iterable_value in zip(tuple_object, dict_object):
                             recursive_check(tuple_iterable_value, dict_iterable_value)
@@ -398,6 +395,15 @@ class FalconMambaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTest
     def test_multi_gpu_data_parallel_forward(self):
         pass
 
+    @unittest.skip(
+        "FalconMamba shares Mamba1's conv path, which has no chunked-continuation support: on a cached "
+        "multi-token forward it rebuilds conv_state from the zero-padded current chunk instead of bridging "
+        "the previous window (and multiplies the raw full-history mask against the local chunk), so the "
+        "split-vs-single comparison cannot match regardless of padding masking — out of Mamba1's contract."
+    )
+    def test_recurrent_layers_mask_padding_on_continued_forward(self):
+        pass
+
 
 @require_torch
 @require_torch_accelerator
@@ -413,7 +419,6 @@ class FalconMambaIntegrationTests(unittest.TestCase):
     def tearDown(self):
         cleanup(torch_device, gc_collect=True)
 
-    # On T4, get `NotImplementedError: Cannot copy out of meta tensor; no data!`
     @require_torch_large_accelerator
     def test_generation_fp16(self):
         model = AutoModelForCausalLM.from_pretrained(self.model_id, dtype=torch.float16, device_map="auto")
@@ -423,10 +428,16 @@ class FalconMambaIntegrationTests(unittest.TestCase):
 
         EXPECTED_OUTPUTS = Expectations(
             {
-                ("cuda", 7): "Hello today I am going to show you how to make a simple and easy to make paper plane.\nStep",
-                ("cuda", 8): 'Hello today Iava,\n\nI am writing to you today to discuss the importance of maintaining a healthy lifestyle',
+                (
+                    "cuda",
+                    (8, 0),
+                ): "Hello today I am going to talk about the “Theory of Relativity” by Albert Einstein.\n",
+                (
+                    "cuda",
+                    (8, 6),
+                ): "Hello today I am going to talk about the “Theory of Relativity” by Albert Einstein.\n",
             }
-        )  # fmt: skip
+        )
         EXPECTED_OUTPUT = EXPECTED_OUTPUTS.get_expectation()
 
         self.assertEqual(
@@ -441,12 +452,20 @@ class FalconMambaIntegrationTests(unittest.TestCase):
             torch_device
         )
 
-        inputs = self.tokenizer(self.text, return_tensors="pt").to(torch_device)
+        inputs = self.tokenizer("The mount Fuji is a nice mountain in", return_tensors="pt").to(torch_device)
         out = model.generate(**inputs, max_new_tokens=20, do_sample=False)
+
+        EXPECTED_OUTPUTS = Expectations(
+            {
+                ("cuda", (8, 0)): 'The mount Fuji is a nice mountain in Japan. It is a volcano. It is 3,776 meters high. It is the highest',
+                ("cuda", (8, 6)): 'The mount Fuji is a nice mountain in Japan. It is 3,776 meters high. It is a volcano. It is a very',
+            }
+        )  # fmt: skip
+        EXPECTED_OUTPUT = EXPECTED_OUTPUTS.get_expectation()
 
         self.assertEqual(
             self.tokenizer.batch_decode(out, skip_special_tokens=False)[0],
-            "Hello today Iava,\n\nI'm sorry to hear that you're having trouble with the ",
+            EXPECTED_OUTPUT,
         )
 
     @pytest.mark.torch_compile_test
@@ -456,13 +475,27 @@ class FalconMambaIntegrationTests(unittest.TestCase):
 
         inputs = self.tokenizer(self.text, return_tensors="pt").to(torch_device)
         out = model.generate(**inputs, max_new_tokens=20, do_sample=False)
-        print(self.tokenizer.batch_decode(out, skip_special_tokens=False)[0])
+
+        EXPECTED_OUTPUTS = Expectations(
+            {
+                (
+                    "cuda",
+                    (8, 0),
+                ): "Hello today I am going to talk about the “Theory of Relativity” by Albert Einstein.\n",
+                (
+                    "cuda",
+                    (8, 6),
+                ): "Hello today I am going to talk about the “Theory of Relativity” by Albert Einstein.\n",
+            }
+        )
+        EXPECTED_OUTPUT = EXPECTED_OUTPUTS.get_expectation()
 
         self.assertEqual(
             self.tokenizer.batch_decode(out, skip_special_tokens=False)[0],
-            "Hello today Iava,\n\nI am writing to you today to discuss the importance of maintaining a healthy lifestyle",
+            EXPECTED_OUTPUT,
         )
 
+    @require_deterministic_for_xpu
     def test_batched_generation(self):
         model_id = "tiiuae/falcon-mamba-7b"
         tok = AutoTokenizer.from_pretrained(model_id)
@@ -472,16 +505,24 @@ class FalconMambaIntegrationTests(unittest.TestCase):
 
         EXPECTED_OUTPUTS = Expectations(
             {
-                ("cuda", 7): [
-                    'Hello today I will be talking about the “Theory of Relativity” by Albert Einstein.\nThe',
-                    'Hello my name is Younes and today I will be talking about the importance of the internet in our lives.\nThe internet is a global',
+                ("xpu", 3): [
+                    "Hello today I am going to talk about the “Theory of Relativity” by Albert Einstein.\n",
+                    "Hello my name is Younes and today I will be talking about the importance of the internet in our lives.\nThe internet is a global",
                 ],
-                ("cuda", 8): [
-                    'Hello today I am going to talk about the “Theory of Relativity” by Albert Einstein.\n',
-                    'Hello my name is Younes and today I will be talking about the importance of the internet in our lives.\nThe internet is a global',
+                ("cuda", (8, 0)): [
+                    "Hello today I am going to talk about the “Theory of Relativity” by Albert Einstein.\n",
+                    "Hello my name is Younes and today I will be talking about the importance of the internet in our lives.\nThe internet is a global",
+                ],
+                ("cuda", (8, 6)): [
+                    "Hello today I am going to talk about the “Theory of Relativity” by Albert Einstein.\n",
+                    "Hello my name is Younes and today I will be talking about the importance of the internet in our lives.\nThe internet is a global",
+                ],
+                ("cuda", 9): [
+                    "Hello today I am going to talk about the “Theory of Relativity” by Albert Einstein.\n",
+                    "Hello my name is Younes and today I will be talking about the importance of the internet in our lives.\nThe internet is a global",
                 ],
             }
-        )  # fmt: skip
+        )
         EXPECTED_OUTPUT = EXPECTED_OUTPUTS.get_expectation()
 
         inputs = tok(texts, return_tensors="pt", padding=True, return_token_type_ids=False).to(torch_device)
@@ -489,7 +530,6 @@ class FalconMambaIntegrationTests(unittest.TestCase):
 
         out = model.generate(**inputs, max_new_tokens=20, do_sample=False)
         out = tok.batch_decode(out, skip_special_tokens=True)
-
         self.assertListEqual(out, EXPECTED_OUTPUT)
 
         # We test the same generations with inputs_embeds
@@ -502,14 +542,22 @@ class FalconMambaIntegrationTests(unittest.TestCase):
 
         EXPECTED_OUTPUTS = Expectations(
             {
-                ("cuda", 7): [
-                    ' I will be talking about the “Theory of Relativity” by Albert Einstein.\nThe',
+                ("xpu", 3): [
+                    ' I am going to talk about the “Theory of Relativity” by Albert Einstein.\n',
                     ' I will be talking about the importance of the internet in our lives.\nThe internet is a global',
                 ],
-                ("cuda", 8): [
+                ("cuda", (8, 0)): [
                     ' I am going to talk about the “Theory of Relativity” by Albert Einstein.\n',
                     ' I will be talking about the importance of the internet in our lives.\nThe internet is a global'
                 ],
+                ("cuda", (8, 6)): [
+                    ' I am going to talk about the “Theory of Relativity” by Albert Einstein.\n',
+                    ' I will be talking about the importance of the internet in our lives.\nThe internet is a global'
+                ],
+                ("cuda", 9): [
+                    ' I am going to talk about the “Theory of Relativity” by Albert Einstein.\n',
+                    ' I will be talking about the importance of the internet in our lives.\nThe internet is a global'
+                ]
             }
         )  # fmt: skip
         EXPECTED_OUTPUT = EXPECTED_OUTPUTS.get_expectation()

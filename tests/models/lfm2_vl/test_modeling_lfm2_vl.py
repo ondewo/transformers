@@ -15,31 +15,27 @@
 
 import math
 import unittest
-from io import BytesIO
 
 import pytest
-import requests
 
 from transformers import AutoProcessor, is_torch_available
 from transformers.models.lfm2_vl.modeling_lfm2_vl import Lfm2VlForConditionalGeneration
 from transformers.testing_utils import (
+    Expectations,
     cleanup,
-    require_read_token,
+    require_deterministic_for_xpu,
     require_torch,
     require_torch_accelerator,
     slow,
     torch_device,
 )
-from transformers.utils.import_utils import is_vision_available
 
 from ...causal_lm_tester import CausalLMModelTester
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
+from ...test_image_processing_common import load_coco_image, load_test_image
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
 
-
-if is_vision_available():
-    from PIL import Image
 
 if is_torch_available():
     import torch
@@ -136,7 +132,7 @@ class Lfm2VlModelTester(CausalLMModelTester):
 
         # For simplicity just set the last n tokens to the image token
         input_ids[input_ids == self.image_token_id] = self.text_config["pad_token_id"]
-        input_ids[:, -self.image_seq_length :] = self.image_token_id
+        input_ids[:, : self.image_seq_length] = self.image_token_id
 
         attention_mask = input_ids.ne(1).to(torch_device)
         inputs_dict = {
@@ -160,9 +156,7 @@ class Lfm2VlModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase
         if is_torch_available()
         else {}
     )
-    test_headmasking = False
-    test_pruning = False
-    fx_compatible = False
+
     model_tester_class = Lfm2VlModelTester
     _is_composite = True
 
@@ -173,6 +167,9 @@ class Lfm2VlModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase
             self, config_class=Lfm2VlConfig, has_text_modality=False, common_properties=common_properties
         )
 
+    def _get_conv_state_shape(self, batch_size: int, config):
+        return (batch_size, config.hidden_size, config.conv_L_cache)
+
     def test_config(self):
         self.config_tester.run_common_tests()
 
@@ -182,10 +179,6 @@ class Lfm2VlModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase
     def test_attention_outputs(self):
         pass
 
-    @unittest.skip("Lfm2 backbone has a special cache format as it alternates between attention and conv layers")
-    def test_past_key_values_format(self):
-        pass
-
     @unittest.skip(
         "Lfm2 backbone has a special cache format which is not compatible with compile as it has static address for conv cache"
     )
@@ -193,40 +186,34 @@ class Lfm2VlModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase
     def test_sdpa_can_compile_dynamic(self):
         pass
 
-    @unittest.skip(reason="Backbone Siglip2VisionModel does not support standalone training")
+    @pytest.mark.xfail(reason="This architecture seems to not compute gradients for some layer.")
     def test_training_gradient_checkpointing(self):
-        pass
+        super().test_training_gradient_checkpointing()
 
-    @unittest.skip(reason="Backbone Siglip2VisionModel does not support standalone training")
-    def test_training_gradient_checkpointing_use_reentrant(self):
-        pass
-
-    @unittest.skip(reason="Backbone Siglip2VisionModel does not support standalone training")
+    @pytest.mark.xfail(reason="This architecture seems to not compute gradients for some layer.")
     def test_training_gradient_checkpointing_use_reentrant_false(self):
-        pass
+        super().test_training_gradient_checkpointing_use_reentrant_false()
+
+    @pytest.mark.xfail(reason="This architecture seems to not compute gradients for some layer.")
+    def test_training_gradient_checkpointing_use_reentrant_true(self):
+        super().test_training_gradient_checkpointing_use_reentrant_true()
 
 
 @require_torch_accelerator
-@require_read_token
 @slow
 class Lfm2VlForConditionalGenerationIntegrationTest(unittest.TestCase):
     def setUp(self):
         self.processor = AutoProcessor.from_pretrained("LiquidAI/LFM2-VL-1.6B")
         self.processor.tokenizer.padding_side = "left"
-        self.image = Image.open(
-            requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw
-        )
-        self.image2 = Image.open(
-            BytesIO(
-                requests.get(
-                    "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
-                ).content
-            )
+        self.image = load_coco_image("000000039769.jpg")
+        self.image2 = load_test_image(
+            "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
         )
 
     def tearDown(self):
         cleanup(torch_device, gc_collect=True)
 
+    @require_deterministic_for_xpu
     def test_integration_test(self):
         model = Lfm2VlForConditionalGeneration.from_pretrained(
             "LiquidAI/LFM2-VL-1.6B",
@@ -243,9 +230,20 @@ class Lfm2VlForConditionalGenerationIntegrationTest(unittest.TestCase):
         generated_ids = model.generate(**inputs, max_new_tokens=20, do_sample=False)
         generated_texts = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
 
-        expected_generated_text = "In this image, we see a cat and a dog lying on a pink blanket. They are both sleeping peacefully. They are"
-        self.assertEqual(generated_texts[0], expected_generated_text)
+        EXPECTED_TEXT_COMPLETION = Expectations(
+            {
+                ("cuda", (8, 0)): [
+                    "In this image, we see two cats sleeping on a pink blanket. There are also two remote controls on the blanket.\n\n\n\n"
+                ],
+                ("cuda", (8, 6)): [
+                    "In this image, we see two cats sleeping on a pink blanket. They are both very relaxed and comfortable. They are both grey"
+                ],
+            }
+        )
+        EXPECTED_TEXT_COMPLETION = EXPECTED_TEXT_COMPLETION.get_expectation()[0]
+        self.assertEqual(generated_texts[0], EXPECTED_TEXT_COMPLETION)
 
+    @require_deterministic_for_xpu
     def test_integration_test_high_resolution(self):
         model = Lfm2VlForConditionalGeneration.from_pretrained(
             "LiquidAI/LFM2-VL-1.6B",
@@ -267,6 +265,7 @@ class Lfm2VlForConditionalGenerationIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(generated_texts[0], expected_generated_text)
 
+    @require_deterministic_for_xpu
     def test_integration_test_batched(self):
         model = Lfm2VlForConditionalGeneration.from_pretrained(
             "LiquidAI/LFM2-VL-450M",
@@ -275,7 +274,7 @@ class Lfm2VlForConditionalGenerationIntegrationTest(unittest.TestCase):
         )
 
         # Create inputs
-        text = ["<image>In this image, we see", "<image>In this image, there is a cat on"]
+        text = ["<image>In this image, we see", "<image>In this image, we see a cat"]
         images = [[self.image2], [self.image]]
         inputs = self.processor(text=text, images=images, return_tensors="pt", padding=True)
         inputs.to(device=torch_device, dtype=torch.bfloat16)
@@ -283,8 +282,105 @@ class Lfm2VlForConditionalGenerationIntegrationTest(unittest.TestCase):
         generated_ids = model.generate(**inputs, max_new_tokens=20, do_sample=False)
         generated_texts = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
 
-        expected_generated_text = [
-            "In this image, we see a panoramic view of the New York City skyline. The iconic Statics and the New York",
-            "In this image, there is a cat on a bed with a cat on a bed with a cat on a bed with a cat on a bed",
-        ]
-        self.assertListEqual(generated_texts, expected_generated_text)
+        EXPECTED_TEXT_COMPLETION = Expectations(
+            {
+                ("cuda", (8, 0)): [
+                    "In this image, we see a panoramic view of the New York City skyline. The iconic Statics and the New York",
+                    "In this image, we see a cat that is lying on its side on a cat bed.",
+                ],
+                ("cuda", (8, 6)): [
+                    "In this image, we see a panoramic view of the New York City skyline. The iconic Statics and the New York",
+                    "In this image, we see a cat that is lying on its side, and is resting on a pink blanket. The cat is lying on",
+                ],
+            }
+        )
+        EXPECTED_TEXT_COMPLETION = EXPECTED_TEXT_COMPLETION.get_expectation()
+        self.assertListEqual(generated_texts, EXPECTED_TEXT_COMPLETION)
+
+
+@require_torch_accelerator
+@slow
+class Lfm2_5VlForConditionalGenerationIntegrationTest(unittest.TestCase):
+    def setUp(self):
+        self.processor = AutoProcessor.from_pretrained("LiquidAI/LFM2.5-VL-1.6B")
+        self.processor.tokenizer.padding_side = "left"
+        self.image = load_coco_image("000000039769.jpg")
+        self.image2 = load_test_image(
+            "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
+        )
+
+    def tearDown(self):
+        cleanup(torch_device, gc_collect=True)
+
+    @require_deterministic_for_xpu
+    def test_integration_test(self):
+        model = Lfm2VlForConditionalGeneration.from_pretrained(
+            "LiquidAI/LFM2.5-VL-1.6B",
+            dtype=torch.bfloat16,
+            device_map="auto",
+        )
+
+        # Create inputs
+        text = "<image>In this image, we see"
+        images = self.image
+        inputs = self.processor(text=text, images=images, return_tensors="pt")
+        inputs.to(device=torch_device, dtype=torch.bfloat16)
+
+        generated_ids = model.generate(**inputs, max_new_tokens=20, do_sample=False)
+        generated_texts = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+        expected_generated_text = (
+            "In this image, we see two cats lying on a pink blanket. One cat is a tabby, and the other is a"
+        )
+        self.assertEqual(generated_texts[0], expected_generated_text)
+
+    @require_deterministic_for_xpu
+    def test_integration_test_high_resolution(self):
+        model = Lfm2VlForConditionalGeneration.from_pretrained(
+            "LiquidAI/LFM2.5-VL-1.6B",
+            dtype=torch.bfloat16,
+            device_map="auto",
+        )
+
+        # Create inputs
+        text = "<image>In this image, we see"
+        images = self.image2
+        inputs = self.processor(text=text, images=images, return_tensors="pt")
+        inputs.to(device=torch_device, dtype=torch.bfloat16)
+
+        generated_ids = model.generate(**inputs, max_new_tokens=20, do_sample=False)
+        generated_texts = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+        expected_generated_text = "In this image, we see the Statue of Liberty, an iconic symbol of freedom and democracy. It stands on Liberty Island in"
+        self.assertEqual(generated_texts[0], expected_generated_text)
+
+    @require_deterministic_for_xpu
+    def test_integration_test_batched(self):
+        model = Lfm2VlForConditionalGeneration.from_pretrained(
+            "LiquidAI/LFM2.5-VL-1.6B",
+            dtype=torch.bfloat16,
+            device_map="auto",
+        )
+
+        # Create inputs
+        text = ["<image>In this image, we see", "<image>In this image, we see"]
+        images = [[self.image2], [self.image]]
+        inputs = self.processor(text=text, images=images, return_tensors="pt", padding=True)
+        inputs.to(device=torch_device, dtype=torch.bfloat16)
+
+        generated_ids = model.generate(**inputs, max_new_tokens=20, do_sample=False)
+        generated_texts = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+        EXPECTED_TEXT_COMPLETION = Expectations(
+            {
+                ("cuda", 8): [
+                    "In this image, we see the Statue of Liberty, an iconic symbol of freedom and democracy. It stands tall on a small",
+                    "In this image, we see two cats lying on a pink blanket. One cat is a tabby, and the other is a",
+                ],
+                ("xpu", 5): [
+                    "In this image, we see the Statue of Liberty, an iconic symbol of freedom and democracy. It stands tall on a small",
+                    "In this image, we see two cats lying on a pink blanket. One cat is a tabby, and the other is a",
+                ],
+            }
+        ).get_expectation()
+        self.assertListEqual(generated_texts, EXPECTED_TEXT_COMPLETION)

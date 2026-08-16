@@ -14,6 +14,7 @@
 """Testing suite for the PyTorch MM Grounding DINO model."""
 
 import collections
+import copy
 import inspect
 import math
 import re
@@ -95,7 +96,7 @@ class MMGroundingDinoModelTester:
     def __init__(
         self,
         parent,
-        batch_size=4,
+        batch_size=2,
         is_training=True,
         use_labels=True,
         hidden_size=32,
@@ -107,7 +108,7 @@ class MMGroundingDinoModelTester:
         attention_probs_dropout_prob=0.1,
         num_queries=2,
         num_channels=3,
-        image_size=98,
+        image_size=128,
         n_targets=8,
         num_labels=2,
         num_feature_levels=4,
@@ -249,9 +250,7 @@ class MMGroundingDinoModelTester:
 class MMGroundingDinoModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     all_model_classes = (MMGroundingDinoModel, MMGroundingDinoForObjectDetection) if is_torch_available() else ()
     is_encoder_decoder = True
-    test_torchscript = False
-    test_pruning = False
-    test_head_masking = False
+
     test_missing_keys = False
     pipeline_model_mapping = (
         {
@@ -323,6 +322,15 @@ class MMGroundingDinoModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.T
 
     @unittest.skip(reason="Feed forward chunking is not implemented")
     def test_feed_forward_chunking(self):
+        pass
+
+    @unittest.skip(reason="Weight tying is hardcoded (module_x = module_y) and always `True`")
+    def test_load_save_without_tied_weights(self):
+        pass
+
+    # Ignore copy
+    def test_tie_weights_is_not_modified(self):
+        # this model doesn't need a test
         pass
 
     def test_attention_outputs(self):
@@ -521,59 +529,47 @@ class MMGroundingDinoModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.T
             expected_arg_names = ["pixel_values", "input_ids"]
             self.assertListEqual(arg_names[: len(expected_arg_names)], expected_arg_names)
 
-    def test_different_timm_backbone(self):
+    def test_backbone_selection(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
 
-        # let's pick a random timm backbone
-        config.backbone = "tf_mobilenetv3_small_075"
-        config.use_timm_backbone = True
-        config.backbone_config = None
-        config.backbone_kwargs = {"in_chans": 3, "out_indices": (2, 3, 4)}
+        def _validate_backbone_init(config):
+            for model_class in self.all_model_classes:
+                model = model_class(copy.deepcopy(config))
+                model.to(torch_device)
+                model.eval()
+                with torch.no_grad():
+                    outputs = model(**self._prepare_for_class(inputs_dict, model_class))
 
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            model.to(torch_device)
-            model.eval()
-            with torch.no_grad():
-                outputs = model(**self._prepare_for_class(inputs_dict, model_class))
+                if model_class.__name__ == "MMGroundingDinoForObjectDetection":
+                    expected_shape = (
+                        self.model_tester.batch_size,
+                        self.model_tester.num_queries,
+                        config.max_text_len,
+                    )
+                    self.assertEqual(outputs.logits.shape, expected_shape)
 
-            if model_class.__name__ == "MMGroundingDinoForObjectDetection":
-                expected_shape = (
-                    self.model_tester.batch_size,
-                    self.model_tester.num_queries,
-                    config.max_text_len,
-                )
-                self.assertEqual(outputs.logits.shape, expected_shape)
+                self.assertTrue(outputs)
 
-            self.assertTrue(outputs)
+        # These kwargs are all removed and are supported only for BC
+        # In new models we have only `backbone_config`. Let's test that there is no regression
+        # let's test a random timm backbone
+        config_dict = config.to_dict()
+        config_dict["backbone"] = "tf_mobilenetv3_small_075"
+        config_dict["use_timm_backbone"] = True
+        config_dict["backbone_config"] = None
+        config_dict["backbone_kwargs"] = {"in_chans": 3, "out_indices": (2, 3, 4)}
+        config = config.__class__(**config_dict)
+        _validate_backbone_init(config)
 
-    @require_timm
-    def test_hf_backbone(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-
-        # Load a pretrained HF checkpoint as backbone
-        config.backbone = "microsoft/resnet-18"
-        config.backbone_config = None
-        config.use_timm_backbone = False
-        config.use_pretrained_backbone = True
-        config.backbone_kwargs = {"out_indices": [2, 3, 4]}
-
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            model.to(torch_device)
-            model.eval()
-            with torch.no_grad():
-                outputs = model(**self._prepare_for_class(inputs_dict, model_class))
-
-            if model_class.__name__ == "MMGroundingDinoForObjectDetection":
-                expected_shape = (
-                    self.model_tester.batch_size,
-                    self.model_tester.num_queries,
-                    config.max_text_len,
-                )
-                self.assertEqual(outputs.logits.shape, expected_shape)
-
-            self.assertTrue(outputs)
+        # Test a pretrained HF checkpoint as backbone
+        config_dict = config.to_dict()
+        config_dict["backbone"] = "microsoft/resnet-18"
+        config_dict["backbone_config"] = None
+        config_dict["use_timm_backbone"] = False
+        config_dict["use_pretrained_backbone"] = True
+        config_dict["backbone_kwargs"] = {"out_indices": [2, 3, 4]}
+        config = config.__class__(**config_dict)
+        _validate_backbone_init(config)
 
     # Copied from tests.models.deformable_detr.test_modeling_deformable_detr.DeformableDetrModelTest.test_two_stage_training with DeformableDetr->MMGroundingDino
     def test_two_stage_training(self):

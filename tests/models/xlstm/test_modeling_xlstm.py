@@ -18,7 +18,12 @@ import unittest
 from parameterized import parameterized
 
 from transformers import AutoTokenizer, is_torch_available, xLSTMConfig
-from transformers.testing_utils import require_read_token, require_torch, require_torch_gpu, slow, torch_device
+from transformers.testing_utils import (
+    require_torch,
+    require_torch_accelerator,
+    slow,
+    torch_device,
+)
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
@@ -86,10 +91,6 @@ class xLSTMModelTester:
         self.step_kernel = step_kernel
         self.tie_word_embeddings = tie_word_embeddings
 
-    def get_large_model_config(self):
-        cfg = xLSTMConfig.from_pretrained("NX-AI/xLSTM-7b")
-        return cfg
-
     def prepare_config_and_inputs(self, scale_attn_by_inverse_layer_idx=False, reorder_and_upcast_attn=False):
         input_ids = ids_tensor([self.batch_size, self.seq_length], self.vocab_size)
 
@@ -154,11 +155,6 @@ class xLSTMModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
     all_model_classes = (xLSTMModel, xLSTMForCausalLM) if is_torch_available() else ()
     all_generative_model_classes = (xLSTMForCausalLM,) if is_torch_available() else ()
     has_attentions = False  # xLSTM does not support attentions
-    fx_compatible = False
-    test_torchscript = False
-    test_model_parallel = False
-    test_pruning = False
-    test_head_masking = False  # xLSTM does not have attention heads
 
     pipeline_model_mapping = (
         {"feature-extraction": xLSTMModel, "text-generation": xLSTMForCausalLM} if is_torch_available() else {}
@@ -174,8 +170,8 @@ class xLSTMModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
     def test_generate_without_input_ids(self):
         pass
 
-    @unittest.skip(reason="xLSTM cache slicing test case is an edge case")
     @parameterized.expand([("greedy", 1), ("beam search", 2)])
+    @unittest.skip(reason="xLSTM cache slicing test case is an edge case")
     def test_generate_from_inputs_embeds(self, _, num_beams):
         pass
 
@@ -246,10 +242,35 @@ class xLSTMModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
             dict_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
             check_equivalence(model, tuple_inputs, dict_inputs, {"output_hidden_states": True})
 
+    def test_chunkwise_shape_calculation(self):
+        config = self.model_tester.get_config()
+
+        config.chunkwise_kernel = "chunkwise--native_autograd"
+
+        model = xLSTMModel(config)
+        model.to(torch_device)
+        model.train(False)
+
+        batch_size, seq_length = 2, config.chunk_size * 2
+        input_ids = ids_tensor([batch_size, seq_length], config.vocab_size)
+
+        with torch.no_grad():
+            outputs = model(input_ids)
+
+        expected_shape = (batch_size, seq_length, config.hidden_size)
+        self.assertEqual(outputs.last_hidden_state.shape, expected_shape)
+
+    @unittest.skip("This model doesn't support beam search with cache, as the cache cannot be reordered")
+    def test_beam_search_generate(self):
+        pass
+
+    @unittest.skip("This model doesn't support beam search with cache, as the cache cannot be reordered")
+    def test_beam_sample_generate(self):
+        pass
+
 
 @require_torch
 @slow
-@require_read_token
 @unittest.skip("Model is fully broken currently")
 class xLSTMIntegrationTest(unittest.TestCase):
     def setUp(self):
@@ -333,7 +354,7 @@ class xLSTMIntegrationTest(unittest.TestCase):
             individual_output = tokenizer.batch_decode(individual_gen, skip_special_tokens=True)[0]
             self.assertEqual(individual_output[:100], batched_output[index_gen][:100])
 
-    @require_torch_gpu
+    @require_torch_accelerator
     def test_xlstm_block_train_vs_eval_equivalence(self):
         # Based on https://github.com/sustcsonglin/flash-linear-attention/issues/63
         # Credit to zhixuan-lin

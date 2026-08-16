@@ -89,17 +89,9 @@ BEiT の使用を開始するのに役立つ公式 Hugging Face およびコミ�
 
 [[autodoc]] models.beit.modeling_beit.BeitModelOutputWithPooling
 
-[[autodoc]] models.beit.modeling_flax_beit.FlaxBeitModelOutputWithPooling
-
 ## BeitConfig
 
 [[autodoc]] BeitConfig
-
-## BeitFeatureExtractor
-
-[[autodoc]] BeitFeatureExtractor
-    - __call__
-    - post_process_semantic_segmentation
 
 ## BeitImageProcessor
 
@@ -107,9 +99,9 @@ BEiT の使用を開始するのに役立つ公式 Hugging Face およびコミ�
     - preprocess
     - post_process_semantic_segmentation
 
-## BeitImageProcessorFast
+## BeitImageProcessorPil
 
-[[autodoc]] BeitImageProcessorFast
+[[autodoc]] BeitImageProcessorPil
     - preprocess
     - post_process_semantic_segmentation
 
@@ -132,18 +124,3 @@ BEiT の使用を開始するのに役立つ公式 Hugging Face およびコミ�
 
 [[autodoc]] BeitForSemanticSegmentation
     - forward
-
-## FlaxBeitModel
-
-[[autodoc]] FlaxBeitModel
-    - __call__
-
-## FlaxBeitForMaskedImageModeling
-
-[[autodoc]] FlaxBeitForMaskedImageModeling
-    - __call__
-
-## FlaxBeitForImageClassification
-
-[[autodoc]] FlaxBeitForImageClassification
-    - __call__

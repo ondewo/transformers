@@ -13,6 +13,7 @@
 # limitations under the License.
 """Testing suite for the PyTorch Table Transformer model."""
 
+import copy
 import inspect
 import math
 import unittest
@@ -202,12 +203,9 @@ class TableTransformerModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.
         else {}
     )
     is_encoder_decoder = True
-    test_torchscript = False
-    test_pruning = False
-    test_head_masking = False
+
     test_missing_keys = False
     zero_init_hidden_state = True
-    test_torch_exportable = True
 
     # special case for head models
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
@@ -443,79 +441,58 @@ class TableTransformerModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.
             arg_names = [*signature.parameters.keys()]
 
             if model.config.is_encoder_decoder:
-                expected_arg_names = ["pixel_values", "pixel_mask"]
-                expected_arg_names.extend(
-                    ["head_mask", "decoder_head_mask", "encoder_outputs"]
-                    if "head_mask" and "decoder_head_mask" in arg_names
-                    else []
-                )
+                expected_arg_names = ["pixel_values", "pixel_mask", "decoder_attention_mask", "encoder_outputs"]
                 self.assertListEqual(arg_names[: len(expected_arg_names)], expected_arg_names)
             else:
                 expected_arg_names = ["pixel_values", "pixel_mask"]
                 self.assertListEqual(arg_names[:1], expected_arg_names)
 
-    def test_different_timm_backbone(self):
+    def test_backbone_selection(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
 
-        # let's pick a random timm backbone
-        config.backbone = "tf_mobilenetv3_small_075"
-        config.backbone_config = None
-        config.use_timm_backbone = True
-        config.backbone_kwargs = {"out_indices": [2, 3, 4]}
+        def _validate_backbone_init(config):
+            for model_class in self.all_model_classes:
+                model = model_class(copy.deepcopy(config))
+                model.to(torch_device)
+                model.eval()
+                with torch.no_grad():
+                    outputs = model(**self._prepare_for_class(inputs_dict, model_class))
 
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            model.to(torch_device)
-            model.eval()
-            with torch.no_grad():
-                outputs = model(**self._prepare_for_class(inputs_dict, model_class))
+                if model_class.__name__ == "TableTransformerForObjectDetection":
+                    expected_shape = (
+                        self.model_tester.batch_size,
+                        self.model_tester.num_queries,
+                        self.model_tester.num_labels + 1,
+                    )
+                    self.assertEqual(outputs.logits.shape, expected_shape)
+                    # Confirm out_indices was propagated to backbone
+                    self.assertEqual(len(model.model.backbone.conv_encoder.intermediate_channel_sizes), 3)
+                else:
+                    # Confirm out_indices was propagated to backbone
+                    self.assertEqual(len(model.backbone.conv_encoder.intermediate_channel_sizes), 3)
 
-            if model_class.__name__ == "TableTransformerForObjectDetection":
-                expected_shape = (
-                    self.model_tester.batch_size,
-                    self.model_tester.num_queries,
-                    self.model_tester.num_labels + 1,
-                )
-                self.assertEqual(outputs.logits.shape, expected_shape)
-                # Confirm out_indices was propagated to backbone
-                self.assertEqual(len(model.model.backbone.conv_encoder.intermediate_channel_sizes), 3)
-            else:
-                # Confirm out_indices was propagated to backbone
-                self.assertEqual(len(model.backbone.conv_encoder.intermediate_channel_sizes), 3)
+                self.assertTrue(outputs)
 
-            self.assertTrue(outputs)
+        # These kwargs are all removed and are supported only for BC
+        # In new models we have only `backbone_config`. Let's test that there is no regression
+        # let's test a random timm backbone
+        config_dict = config.to_dict()
+        config_dict["backbone"] = "tf_mobilenetv3_small_075"
+        config_dict["backbone_config"] = None
+        config_dict["use_timm_backbone"] = True
+        config_dict["backbone_kwargs"] = {"out_indices": [2, 3, 4]}
+        config = config.__class__(**config_dict)
+        _validate_backbone_init(config)
 
-    def test_hf_backbone(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-
-        # Load a pretrained HF checkpoint as backbone
-        config.backbone = "microsoft/resnet-18"
-        config.backbone_config = None
-        config.use_timm_backbone = False
-        config.use_pretrained_backbone = True
-        config.backbone_kwargs = {"out_indices": [2, 3, 4]}
-
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            model.to(torch_device)
-            model.eval()
-            with torch.no_grad():
-                outputs = model(**self._prepare_for_class(inputs_dict, model_class))
-
-            if model_class.__name__ == "TableTransformerForObjectDetection":
-                expected_shape = (
-                    self.model_tester.batch_size,
-                    self.model_tester.num_queries,
-                    self.model_tester.num_labels + 1,
-                )
-                self.assertEqual(outputs.logits.shape, expected_shape)
-                # Confirm out_indices was propagated to backbone
-                self.assertEqual(len(model.model.backbone.conv_encoder.intermediate_channel_sizes), 3)
-            else:
-                # Confirm out_indices was propagated to backbone
-                self.assertEqual(len(model.backbone.conv_encoder.intermediate_channel_sizes), 3)
-
-            self.assertTrue(outputs)
+        # Test a pretrained HF checkpoint as backbone
+        config_dict = config.to_dict()
+        config_dict["backbone"] = "microsoft/resnet-18"
+        config_dict["backbone_config"] = None
+        config_dict["use_timm_backbone"] = False
+        config_dict["use_pretrained_backbone"] = True
+        config_dict["backbone_kwargs"] = {"out_indices": [2, 3, 4]}
+        config = config.__class__(**config_dict)
+        _validate_backbone_init(config)
 
     def test_greyscale_images(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()

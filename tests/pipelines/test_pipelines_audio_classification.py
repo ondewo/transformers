@@ -20,7 +20,6 @@ from huggingface_hub import AudioClassificationOutputElement
 
 from transformers import (
     MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING,
-    TF_MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING,
     is_torch_available,
 )
 from transformers.pipelines import AudioClassificationPipeline, pipeline
@@ -43,7 +42,6 @@ if is_torch_available():
 @is_pipeline_test
 class AudioClassificationPipelineTests(unittest.TestCase):
     model_mapping = MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING
-    tf_model_mapping = TF_MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING
     _dataset = None
 
     @classmethod
@@ -152,7 +150,7 @@ class AudioClassificationPipelineTests(unittest.TestCase):
         output = audio_classifier(audio, top_k=4)
 
         # Expected outputs are collected running the test on torch 2.6 in few scenarios.
-        # Running on CUDA T4/A100 and on XPU PVC (note: using stock torch xpu, NOT using IPEX):
+        # Running on CUDA T4/A100 and on XPU PVC:
         EXPECTED_OUTPUT = [
             {"score": 0.0833, "label": "go"},
             {"score": 0.0833, "label": "off"},

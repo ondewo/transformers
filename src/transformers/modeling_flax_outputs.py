@@ -17,6 +17,12 @@ import flax
 import jax.numpy as jnp
 
 from .utils import ModelOutput
+from .utils.flax_compat import patch_is_tensor_for_jax
+
+
+# 5.x's is_tensor does not recognise jax arrays, which makes ModelOutput.__post_init__ mutate
+# these frozen flax.struct dataclasses. Must run before any Flax output is instantiated.
+patch_is_tensor_for_jax()
 
 
 @flax.struct.dataclass

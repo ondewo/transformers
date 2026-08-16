@@ -9,13 +9,10 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 -->
-*This model was released on 2021-06-25 and added to Hugging Face Transformers on 2024-03-13.*
+*This model was published in HF papers on 2021-06-25 and contributed to Hugging Face Transformers on 2024-03-13.*
 
 # Pyramid Vision Transformer V2 (PVTv2)
 
-<div class="flex flex-wrap space-x-1">
-<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
-</div>
 
 ## Overview
 
@@ -32,7 +29,7 @@ Another powerful feature of the PVTv2 is the complexity reduction in the self-at
 
 SRA was introduced in PVT, and is the default attention complexity reduction method used in PVTv2. However, PVTv2 also introduced the option of using a self-attention mechanism with linear complexity related to image size, which they called "Linear SRA". This method uses average pooling to reduce the hidden states to a fixed size that is invariant to their original resolution (although this is inherently more lossy than regular SRA). This option can be enabled by setting `linear_attention` to `True` in the PVTv2Config.
 
-### Abstract from the paper:
+### Abstract from the paper
 
 *Transformer recently has presented encouraging progress in computer vision. In this work, we present new baselines by improving the original Pyramid Vision Transformer (PVT v1) by adding three designs, including (1) linear complexity attention layer, (2) overlapping patch embedding, and (3) convolutional feed-forward network. With these modifications, PVT v2 reduces the computational complexity of PVT v1 to linear and achieves significant improvements on fundamental vision tasks such as classification, detection, and segmentation. Notably, the proposed PVT v2 achieves comparable or better performances than recent works such as Swin Transformer. We hope this work will facilitate state-of-the-art Transformer researches in computer vision. Code is available at https://github.com/whai362/PVT.*
 
@@ -52,11 +49,12 @@ This model was contributed by [FoamoftheSea](https://huggingface.co/FoamoftheSea
 ```python
 import requests
 import torch
-
-from transformers import AutoModelForImageClassification, AutoImageProcessor
 from PIL import Image
 
-model = AutoModelForImageClassification.from_pretrained("OpenGVLab/pvt_v2_b0")
+from transformers import AutoImageProcessor, AutoModelForImageClassification
+
+
+model = AutoModelForImageClassification.from_pretrained("OpenGVLab/pvt_v2_b0", device_map="auto")
 image_processor = AutoImageProcessor.from_pretrained("OpenGVLab/pvt_v2_b0")
 url = "http://images.cocodataset.org/val2017/000000039769.jpg"
 image = Image.open(requests.get(url, stream=True).raw)
@@ -64,20 +62,20 @@ processed = image_processor(image)
 outputs = model(torch.tensor(processed["pixel_values"]))
 ```
 
-To use the PVTv2 as a backbone for more complex architectures like DeformableDETR, you can use AutoBackbone (this model would need fine-tuning as you're replacing the backbone in the pretrained model):
+To use the PVTv2 as a backbone for more complex architectures like DeformableDETR, you can use AutoBackbone (this model would need fine-tuning as you're replacing the backbone in the pretrained model and it is initialized with random weights):
 
 ```python
 import requests
 import torch
-
-from transformers import AutoConfig, AutoModelForObjectDetection, AutoImageProcessor
 from PIL import Image
+
+from transformers import AutoConfig, AutoImageProcessor, AutoModelForObjectDetection
+
 
 model = AutoModelForObjectDetection.from_config(
     config=AutoConfig.from_pretrained(
         "SenseTime/deformable-detr",
         backbone_config=AutoConfig.from_pretrained("OpenGVLab/pvt_v2_b5"),
-        use_timm_backbone=False
     ),
 )
 

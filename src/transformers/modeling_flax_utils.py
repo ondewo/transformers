@@ -36,8 +36,6 @@ from .dynamic_module_utils import custom_object_save
 from .generation import FlaxGenerationMixin, GenerationConfig
 from .modeling_flax_pytorch_utils import load_pytorch_checkpoint_in_flax_state_dict
 from .utils import (
-    FLAX_WEIGHTS_INDEX_NAME,
-    FLAX_WEIGHTS_NAME,
     SAFE_WEIGHTS_INDEX_NAME,
     SAFE_WEIGHTS_NAME,
     WEIGHTS_INDEX_NAME,
@@ -47,15 +45,20 @@ from .utils import (
     add_start_docstrings_to_model_forward,
     cached_file,
     copy_func,
-    download_url,
     has_file,
-    is_offline_mode,
-    is_remote_url,
     logging,
     replace_return_docstrings,
 )
+# Removed from transformers in 5.0.0 along with the Flax models - see utils/flax_compat.py.
+from .utils.flax_compat import (
+    FLAX_WEIGHTS_INDEX_NAME,
+    FLAX_WEIGHTS_NAME,
+    download_url,
+    is_offline_mode,
+    is_remote_url,
+)
 from .utils.hub import convert_file_size_to_int, get_checkpoint_shard_files
-from .utils.import_utils import is_safetensors_available
+from .utils.flax_compat import is_safetensors_available
 
 
 if is_safetensors_available():
@@ -678,7 +681,6 @@ class FlaxPreTrainedModel(PushToHubMixin, FlaxGenerationMixin):
                 cache_dir=cache_dir,
                 return_unused_kwargs=True,
                 force_download=force_download,
-                resume_download=resume_download,
                 proxies=proxies,
                 local_files_only=local_files_only,
                 token=token,
@@ -770,7 +772,6 @@ class FlaxPreTrainedModel(PushToHubMixin, FlaxGenerationMixin):
                         "cache_dir": cache_dir,
                         "force_download": force_download,
                         "proxies": proxies,
-                        "resume_download": resume_download,
                         "local_files_only": local_files_only,
                         "token": token,
                         "user_agent": user_agent,
@@ -871,7 +872,6 @@ class FlaxPreTrainedModel(PushToHubMixin, FlaxGenerationMixin):
                 cache_dir=cache_dir,
                 force_download=force_download,
                 proxies=proxies,
-                resume_download=resume_download,
                 local_files_only=local_files_only,
                 token=token,
                 user_agent=user_agent,
@@ -1055,7 +1055,6 @@ class FlaxPreTrainedModel(PushToHubMixin, FlaxGenerationMixin):
                     pretrained_model_name_or_path,
                     cache_dir=cache_dir,
                     force_download=force_download,
-                    resume_download=resume_download,
                     proxies=proxies,
                     local_files_only=local_files_only,
                     token=token,

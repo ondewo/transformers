@@ -9,16 +9,15 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
+⚠️ Note that this file is in Markdown but contains specific syntax for our doc-builder (similar to MDX) that may not be
 rendered properly in your Markdown viewer.
 
 -->
-*This model was released on 2023-01-09 and added to Hugging Face Transformers on 2023-04-10.*
+*This model was published in HF papers on 2023-01-09 and contributed to Hugging Face Transformers on 2023-04-10.*
 
 # GPTBigCode
 
 <div class="flex flex-wrap space-x-1">
-<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
 <img alt="FlashAttention" src="https://img.shields.io/badge/%E2%9A%A1%EF%B8%8E%20FlashAttention-eae0c8?style=flat">
 <img alt="SDPA" src="https://img.shields.io/badge/SDPA-DE3412?style=flat&logo=pytorch&logoColor=white">
 </div>
@@ -50,9 +49,6 @@ The main differences compared to GPT2.
 
 You can read more about the optimizations in the [original pull request](https://github.com/huggingface/transformers/pull/22575)
 
-> [!NOTE]
-> The `head_mask` argument is ignored when using all attention implementation other than "eager". If you have a `head_mask` and want it to have effect, load the model with `XXXModel.from_pretrained(model_id, attn_implementation="eager")`
-
 ## Combining Starcoder and Flash Attention 2
 
 First, make sure to install the latest version of Flash Attention 2 to include the sliding window attention feature.
@@ -66,20 +62,19 @@ Make also sure that you have a hardware that is compatible with Flash-Attention 
 To load and run a model using Flash Attention 2, refer to the snippet below:
 
 ```python
->>> import torch
->>> from transformers import AutoModelForCausalLM, AutoTokenizer, infer_device
->>> device = infer_device() # the device to load the model onto
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
->>> model = AutoModelForCausalLM.from_pretrained("bigcode/gpt_bigcode-santacoder", dtype=torch.float16, attn_implementation="flash_attention_2")
->>> tokenizer = AutoTokenizer.from_pretrained("bigcode/gpt_bigcode-santacoder")
 
->>> prompt = "def hello_world():"
+model = AutoModelForCausalLM.from_pretrained("bigcode/gpt_bigcode-santacoder", device_map="auto", attn_implementation="flash_attention_2")
+tokenizer = AutoTokenizer.from_pretrained("bigcode/gpt_bigcode-santacoder")
 
->>> model_inputs = tokenizer([prompt], return_tensors="pt").to(model.device)
->>> model.to(device)
+prompt = "def hello_world():"
 
->>> generated_ids = model.generate(**model_inputs, max_new_tokens=30, do_sample=False)
->>> tokenizer.batch_decode(generated_ids)[0]
+model_inputs = tokenizer([prompt], return_tensors="pt").to(model.device)
+model.to(model.device)
+
+generated_ids = model.generate(**model_inputs, max_new_tokens=30, do_sample=False)
+tokenizer.batch_decode(generated_ids)[0]
 'def hello_world():\n    print("hello world")\n\nif __name__ == "__main__":\n    print("hello world")\n<|endoftext|>'
 ```
 

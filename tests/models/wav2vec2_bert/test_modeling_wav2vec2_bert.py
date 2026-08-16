@@ -64,28 +64,27 @@ class Wav2Vec2BertModelTester:
         batch_size=13,
         seq_length=200,  # speech is longer
         is_training=False,
-        hidden_size=16,
-        feature_projection_input_dim=16,
+        hidden_size=120,
+        feature_projection_input_dim=10,
         num_conv_pos_embeddings=16,
         num_conv_pos_embedding_groups=2,
-        num_hidden_layers=2,
+        num_hidden_layers=4,
         num_attention_heads=2,
-        hidden_dropout_prob=0.1,
-        intermediate_size=20,
+        hidden_dropout_prob=0.0,
+        intermediate_size=216,
         layer_norm_eps=1e-5,
         hidden_act="gelu",
         initializer_range=0.02,
-        mask_time_prob=0.5,
+        mask_time_prob=0.0,
         mask_time_length=2,
-        vocab_size=32,
+        vocab_size=16,
         do_stable_layer_norm=False,
         num_adapter_layers=2,
         adapter_stride=2,
-        tdnn_dim=(32, 32),
-        tdnn_kernel=(5, 3),
+        tdnn_dim=(4, 4),
+        tdnn_kernel=(3, 3),
         tdnn_dilation=(1, 2),
-        xvector_output_dim=32,
-        position_embeddings_type="relative",
+        xvector_output_dim=2,
         scope=None,
     ):
         self.parent = parent
@@ -114,7 +113,6 @@ class Wav2Vec2BertModelTester:
         self.tdnn_kernel = tdnn_kernel
         self.tdnn_dilation = tdnn_dilation
         self.xvector_output_dim = xvector_output_dim
-        self.position_embeddings_type = position_embeddings_type
 
         self.output_seq_length = self.seq_length
         self.encoder_seq_length = self.output_seq_length
@@ -409,6 +407,8 @@ class Wav2Vec2BertModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.Test
         else ()
     )
 
+    model_split_percents = [0.5, 0.8]
+
     pipeline_model_mapping = (
         {
             "audio-classification": Wav2Vec2BertForSequenceClassification,
@@ -419,13 +419,9 @@ class Wav2Vec2BertModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.Test
         else {}
     )
 
-    test_pruning = False
-    test_headmasking = False
-    test_torchscript = False
-
     def setUp(self):
         self.model_tester = Wav2Vec2BertModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=Wav2Vec2BertConfig, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=Wav2Vec2BertConfig, hidden_size=32)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -578,13 +574,13 @@ class Wav2Vec2BertModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.Test
     # overwrite from test_modeling_common
     def _mock_init_weights(self, module):
         if hasattr(module, "weight") and module.weight is not None:
-            module.weight.data.fill_(3)
+            module.weight.fill_(3)
         if hasattr(module, "weight_g") and module.weight_g is not None:
             module.weight_g.data.fill_(3)
         if hasattr(module, "weight_v") and module.weight_v is not None:
             module.weight_v.data.fill_(3)
         if hasattr(module, "bias") and module.bias is not None:
-            module.bias.data.fill_(3)
+            module.bias.fill_(3)
         if hasattr(module, "pos_bias_u") and module.pos_bias_u is not None:
             module.pos_bias_u.data.fill_(3)
         if hasattr(module, "pos_bias_v") and module.pos_bias_v is not None:

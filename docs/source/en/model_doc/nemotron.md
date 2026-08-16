@@ -11,31 +11,31 @@ an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express o
 specific language governing permissions and limitations under the License.
 
 -->
-*This model was released on 2024-02-26 and added to Hugging Face Transformers on 2024-08-06.*
+*This model was published in HF papers on 2024-02-26 and contributed to Hugging Face Transformers on 2024-08-06.*
 
 # Nemotron
 
 <div class="flex flex-wrap space-x-1">
-<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
 <img alt="FlashAttention" src="https://img.shields.io/badge/%E2%9A%A1%EF%B8%8E%20FlashAttention-eae0c8?style=flat">
 <img alt="SDPA" src="https://img.shields.io/badge/SDPA-DE3412?style=flat&logo=pytorch&logoColor=white">
 </div>
 
-### License
+## License
 
+Minitron is released under the [NVIDIA Open Model License Agreement](https://developer.download.nvidia.com/licenses/nvidia-open-model-license-agreement-june-2024.pdf).
 The use of this model is governed by the [NVIDIA AI Foundation Models Community License Agreement](https://developer.nvidia.com/downloads/nv-ai-foundation-models-license).
 
-### Description
+## Description
 
 Nemotron-4 is a family of enterprise ready generative text models compatible with [NVIDIA NeMo Framework](https://www.nvidia.com/en-us/ai-data-science/generative-ai/nemo-framework/).
 
 NVIDIA NeMo is an end-to-end, cloud-native platform to build, customize, and deploy generative AI models anywhere. It includes training and inferencing frameworks, guardrailing toolkits, data curation tools, and pretrained models, offering enterprises an easy, cost-effective, and fast way to adopt generative AI. To get access to NeMo Framework, please sign up at [this link](https://developer.nvidia.com/nemo-framework/join).
 
-### References
+## References
 
 [Announcement Blog](https://developer.nvidia.com/blog/nvidia-ai-foundation-models-build-custom-enterprise-chatbots-and-co-pilots-with-production-ready-llms/)
 
-### Model Architecture
+## Model Architecture
 
 **Architecture Type:** Transformer
 
@@ -56,16 +56,14 @@ Minitron models are for research and development only.
 The following code provides an example of how to load the Minitron-4B model and use it to perform text generation.
 
 ```python
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, infer_device
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 
 # Load the tokenizer and model
 model_path = 'nvidia/Minitron-4B-Base'
 tokenizer  = AutoTokenizer.from_pretrained(model_path)
 
-device = infer_device()
-dtype  = torch.bfloat16
-model  = AutoModelForCausalLM.from_pretrained(model_path, dtype=dtype, device_map=device)
+model  = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
 
 # Prepare the input text
 prompt = 'Complete the paragraph: our solar system is'
@@ -79,10 +77,6 @@ output_text = tokenizer.decode(outputs[0])
 print(output_text)
 ```
 
-### License
-
-Minitron is released under the [NVIDIA Open Model License Agreement](https://developer.download.nvidia.com/licenses/nvidia-open-model-license-agreement-june-2024.pdf).
-
 ### Evaluation Results
 
 *5-shot performance.* Language Understanding evaluated using [Massive Multitask Language Understanding](https://huggingface.co/papers/2009.03300):
@@ -95,7 +89,7 @@ Minitron is released under the [NVIDIA Open Model License Agreement](https://dev
 
 | HellaSwag | Winogrande | GSM8K| ARC-C | XLSum |
 | :------------- | :------------- | :------------- | :------------- | :------------- |
-| 75.0 | 74.0 | 24.1  | 50.9 | 29.5
+| 75.0 | 74.0 | 24.1  | 50.9 | 29.5 |
 
 *Code generation performance*. Evaluated using [HumanEval](https://github.com/openai/human-eval):
 

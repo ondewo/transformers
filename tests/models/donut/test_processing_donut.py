@@ -13,29 +13,24 @@
 # limitations under the License.
 
 
-import tempfile
 import unittest
 
-from transformers import DonutImageProcessor, DonutProcessor, XLMRobertaTokenizerFast
+from transformers import DonutProcessor
 
 from ...test_processing_common import ProcessorTesterMixin
 
 
 class DonutProcessorTest(ProcessorTesterMixin, unittest.TestCase):
-    from_pretrained_id = "naver-clova-ix/donut-base"
+    # Tiny processor created with make_tiny_processor.py from "naver-clova-ix/donut-base"
+    tiny_model_id = "hf-internal-testing/tiny-processor-donut"
     processor_class = DonutProcessor
 
     @classmethod
-    def setUpClass(cls):
-        cls.processor = DonutProcessor.from_pretrained(cls.from_pretrained_id)
-        cls.tmpdirname = tempfile.mkdtemp()
-
-        image_processor = DonutImageProcessor()
-        tokenizer = XLMRobertaTokenizerFast.from_pretrained(cls.from_pretrained_id)
-
-        processor = DonutProcessor(image_processor, tokenizer)
-
-        processor.save_pretrained(cls.tmpdirname)
+    def _setup_image_processor(cls):
+        image_processor_class = cls._get_component_class_from_processor("image_processor")
+        # Default size=2560×1920 is the document-scanning resolution (~59 MB per image as float32).
+        # Use 64×64 for tests — no assertions check spatial dimensions.
+        return image_processor_class.from_pretrained(cls.tiny_model_id, size={"height": 64, "width": 64})
 
     def test_token2json(self):
         expected_json = {
@@ -58,6 +53,7 @@ class DonutProcessorTest(ProcessorTesterMixin, unittest.TestCase):
             "<s_multiline>text\nwith\nnewlines</s_multiline>"
             "<s_empty></s_empty>"
         )
-        actual_json = self.processor.token2json(sequence)
+        processor = self.get_processor()
+        actual_json = processor.token2json(sequence)
 
         self.assertDictEqual(actual_json, expected_json)

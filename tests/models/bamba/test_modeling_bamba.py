@@ -24,6 +24,7 @@ from transformers import (
     AutoTokenizer,
     BambaConfig,
     DataCollatorWithFlattening,
+    DynamicCache,
     is_torch_available,
 )
 from transformers.testing_utils import (
@@ -32,9 +33,9 @@ from transformers.testing_utils import (
     get_device_properties,
     require_deterministic_for_xpu,
     require_flash_attn,
+    require_kernels,
     require_torch,
     require_torch_accelerator,
-    require_torch_gpu,
     slow,
     torch_device,
 )
@@ -48,13 +49,7 @@ from ...test_pipeline_mixin import PipelineTesterMixin
 if is_torch_available():
     import torch
 
-    from transformers import (
-        BambaForCausalLM,
-        BambaModel,
-    )
-    from transformers.models.bamba.modeling_bamba import (
-        HybridMambaAttentionDynamicCache,
-    )
+    from transformers import BambaForCausalLM, BambaModel
 
 
 class BambaModelTester:
@@ -231,14 +226,9 @@ class BambaModelTester:
         model.eval()
 
         # first forward pass
-        # Attention: Jamba needs the cache to be initialized to return a cache!
-        past_key_values = HybridMambaAttentionDynamicCache(
-            config, input_ids.shape[0], model.dtype, device=model.device
-        )
         outputs = model(
             input_ids,
             attention_mask=input_mask,
-            past_key_values=past_key_values,
             use_cache=True,
         )
         past_key_values = outputs.past_key_values
@@ -261,9 +251,6 @@ class BambaModelTester:
             attention_mask=next_attention_mask,
             past_key_values=past_key_values,
             output_hidden_states=True,
-            cache_position=torch.arange(
-                input_ids.shape[1], input_ids.shape[1] + next_tokens.shape[1], device=model.device
-            ),
         )["hidden_states"][0]
 
         # select random slice
@@ -275,6 +262,41 @@ class BambaModelTester:
 
         # test that outputs are equal for slice
         self.parent.assertTrue(torch.allclose(output_from_past_slice, output_from_no_past_slice, atol=1e-3))
+
+    def create_and_check_mamba_chunked_prefill(self, config, input_ids, *args, device="cpu"):
+        """
+        Adapted from `test_linear_attention_multi_token_cached_forward_matches_single_token`
+        to check whether multi-token cached input is properly handled.
+
+        Can either be run on GPU (fast path) or CPU (slow path), see `test_mamba_chunked_prefill_*`
+        """
+        model = self.model_class(config=config)
+        model.to(device)
+        model.eval()
+
+        input_ids = input_ids[:1].to(device)
+        prefill_len = input_ids.shape[1] // 2 + 1
+        prompt = input_ids[:, :prefill_len]
+        next_token = input_ids[:, prefill_len : prefill_len + 1]
+        distractors = input_ids[:, prefill_len + 1 :]
+        multi_input = torch.cat([next_token, distractors], dim=1)
+
+        cache_single = DynamicCache(config=config)
+        with torch.no_grad():
+            model(input_ids=prompt, past_key_values=cache_single, use_cache=True)
+            single_out = model(input_ids=next_token, past_key_values=cache_single, use_cache=True)
+        ref_first = single_out.last_hidden_state[:, 0, :]
+
+        cache_multi = DynamicCache(config=config)
+        with torch.no_grad():
+            model(input_ids=prompt, past_key_values=cache_multi, use_cache=True)
+            multi_out = model(input_ids=multi_input, past_key_values=cache_multi, use_cache=True)
+        under_test_first = multi_out.last_hidden_state[:, 0, :]
+
+        self.parent.assertTrue(
+            torch.allclose(ref_first, under_test_first, atol=1e-4, rtol=1e-4),
+            msg=f"Max diff: {(ref_first - under_test_first).abs().max().item():.6f}",
+        )
 
 
 @require_torch
@@ -289,33 +311,21 @@ class BambaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
         if is_torch_available()
         else {}
     )
-    test_headmasking = False
-    test_pruning = False
-    fx_compatible = False
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer
     model_split_percents = [0.5, 0.7, 0.8]
 
-    def _check_past_key_values_for_generate(self, batch_size, decoder_past_key_values, cache_length, config):
-        self.assertIsInstance(decoder_past_key_values, HybridMambaAttentionDynamicCache)
-
-        # (batch, head, seq_length, head_features)
-        expected_shape = (
+    def _get_conv_state_shape(self, batch_size: int, config):
+        conv_shape = (
             batch_size,
-            config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.num_attention_heads,
-            cache_length,
-            config.hidden_size // config.num_attention_heads,
+            config.mamba_expand * config.hidden_size + 2 * config.mamba_n_groups * config.mamba_d_state,
+            config.mamba_d_conv,
         )
+        return conv_shape
 
-        self.assertListEqual(
-            [key_tensor.shape for key_tensor in decoder_past_key_values.key_cache],
-            [expected_shape] * len(decoder_past_key_values.key_cache),
-        )
-        self.assertListEqual(
-            [value_cache.shape for value_cache in decoder_past_key_values.value_cache],
-            [expected_shape] * len(decoder_past_key_values.value_cache),
-        )
+    def _get_recurrent_state_shape(self, batch_size: int, config):
+        return (batch_size, config.mamba_n_heads, config.mamba_d_head, config.mamba_d_state)
 
     def setUp(self):
         self.model_tester = self.model_tester_class(self)
@@ -335,6 +345,16 @@ class BambaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
     def test_decoder_model_past_with_large_inputs(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_decoder_model_past_large_inputs(*config_and_inputs)
+
+    def test_mamba2_chunked_prefill_cpu(self):
+        config_and_inputs = self.model_tester.prepare_config_and_inputs()
+        self.model_tester.create_and_check_mamba_chunked_prefill(*config_and_inputs, device="cpu")
+
+    @require_torch_accelerator
+    @require_kernels
+    def test_mamba2_chunked_prefill_torch_device(self):
+        config_and_inputs = self.model_tester.prepare_config_and_inputs()
+        self.model_tester.create_and_check_mamba_chunked_prefill(*config_and_inputs, device=torch_device)
 
     def test_attention_outputs(self):
         r"""
@@ -426,7 +446,7 @@ class BambaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
         pass
 
     @require_flash_attn
-    @require_torch_gpu
+    @require_torch_accelerator
     @mark.flash_attn_test
     @slow
     @unittest.skip(
@@ -528,7 +548,7 @@ class BambaModelIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         model_id = "ibm-fms/Bamba-9B"
-        cls.model = BambaForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16)
+        cls.model = BambaForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16, device_map=torch_device)
         cls.tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         # feels a bit forced to have to do this for the generation test
@@ -548,12 +568,8 @@ class BambaModelIntegrationTest(unittest.TestCase):
         )
         # fmt: on
 
-        self.model.to(torch_device)
-
-        input_ids = self.tokenizer("Hey how are you doing on this lovely evening?", return_tensors="pt")[
-            "input_ids"
-        ].to(torch_device)
-        out = self.model.generate(input_ids, do_sample=False, max_new_tokens=10)
+        inputs = self.tokenizer("Hey how are you doing on this lovely evening?", return_tensors="pt").to(torch_device)
+        out = self.model.generate(**inputs, do_sample=False, max_new_tokens=10)
         output_sentence = self.tokenizer.decode(out[0, :])
         expected = expectations.get_expectation()
         self.assertEqual(output_sentence, expected)
@@ -561,7 +577,7 @@ class BambaModelIntegrationTest(unittest.TestCase):
         # TODO: there are significant differences in the logits across major cuda versions, which shouldn't exist
         if self.device_properties[0] == "cuda" and self.device_properties[1] == 8:
             with torch.no_grad():
-                logits = self.model(input_ids=input_ids, logits_to_keep=40).logits
+                logits = self.model(**inputs, logits_to_keep=40).logits
 
             EXPECTED_LOGITS_NO_GRAD = torch.tensor(
                 [
@@ -600,8 +616,6 @@ class BambaModelIntegrationTest(unittest.TestCase):
         )
         # fmt: on
         EXPECTED_TEXT = EXPECTED_TEXTS.get_expectation()
-
-        self.model.to(torch_device)
 
         inputs = self.tokenizer(
             ["Hey how are you doing on this lovely evening?", "I am late! I need to"],

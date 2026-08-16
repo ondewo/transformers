@@ -17,14 +17,11 @@
 
 # this script dumps information about the environment
 
-import os
 import sys
 
 import transformers
 from transformers import is_torch_hpu_available, is_torch_xpu_available
 
-
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 print("Python version:", sys.version)
 print("transformers version:", transformers.__version__)
@@ -63,15 +60,6 @@ try:
     print("DeepSpeed version:", deepspeed.__version__)
 except ImportError:
     print("DeepSpeed version:", None)
-
-try:
-    import tensorflow as tf
-
-    print("TensorFlow version:", tf.__version__)
-    print("TF GPUs available:", bool(tf.config.list_physical_devices("GPU")))
-    print("Number of TF GPUs available:", len(tf.config.list_physical_devices("GPU")))
-except ImportError:
-    print("TensorFlow version:", None)
 
 
 try:

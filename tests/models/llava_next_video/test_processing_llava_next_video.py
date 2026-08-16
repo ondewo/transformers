@@ -13,13 +13,12 @@
 # limitations under the License.
 
 import json
-import shutil
-import tempfile
 import unittest
 
+import numpy as np
 import torch
 
-from transformers import AutoProcessor, LlamaTokenizerFast, LlavaNextVideoProcessor
+from transformers import LlavaNextVideoProcessor
 from transformers.testing_utils import require_vision
 from transformers.utils import is_torchvision_available, is_vision_available
 
@@ -27,44 +26,15 @@ from ...test_processing_common import ProcessorTesterMixin
 
 
 if is_vision_available():
-    from transformers import LlavaNextImageProcessor
-
     if is_torchvision_available():
-        from transformers import LlavaNextVideoVideoProcessor
+        pass
 
 
 @require_vision
 class LlavaNextVideoProcessorTest(ProcessorTesterMixin, unittest.TestCase):
     processor_class = LlavaNextVideoProcessor
-
-    @classmethod
-    def setUpClass(cls):
-        cls.tmpdirname = tempfile.mkdtemp()
-        image_processor = LlavaNextImageProcessor()
-        video_processor = LlavaNextVideoVideoProcessor()
-        tokenizer = LlamaTokenizerFast.from_pretrained("llava-hf/LLaVA-NeXT-Video-7B-hf")
-        tokenizer.add_special_tokens({"additional_special_tokens": ["<image>", "<video>"]})
-        processor_kwargs = cls.prepare_processor_dict()
-
-        processor = LlavaNextVideoProcessor(
-            video_processor=video_processor, image_processor=image_processor, tokenizer=tokenizer, **processor_kwargs
-        )
-        processor.save_pretrained(cls.tmpdirname)
-        cls.image_token = processor.image_token
-        cls.video_token = processor.video_token
-
-    def get_tokenizer(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs).tokenizer
-
-    def get_image_processor(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs).image_processor
-
-    def get_video_processor(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs).video_processor
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmpdirname, ignore_errors=True)
+    # Tiny processor created with make_tiny_processor.py from "llava-hf/LLaVA-NeXT-Video-7B-hf"
+    tiny_model_id = "hf-internal-testing/tiny-processor-llava_next_video"
 
     @classmethod
     def prepare_processor_dict(cls):
@@ -74,6 +44,14 @@ class LlavaNextVideoProcessorTest(ProcessorTesterMixin, unittest.TestCase):
             "patch_size": 128,
             "vision_feature_select_strategy": "default",
         }
+
+    def prepare_video_inputs(self, batch_size=None):
+        """Use tiny frames to keep test_processor_text_has_no_visual memory-efficient."""
+        video_input = [np.random.randint(255, size=(3, 8, 8), dtype=np.uint8)] * 2
+        video_input = np.array(video_input)
+        if batch_size is None:
+            return video_input
+        return [video_input] * batch_size
 
     # Copied from tests.models.llava.test_processing_llava.LlavaProcessorTest.test_get_num_vision_tokens
     def test_get_num_vision_tokens(self):

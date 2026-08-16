@@ -27,12 +27,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
-from ..models.auto import (
-    FLAX_MODEL_FOR_CAUSAL_LM_MAPPING,
-    FLAX_MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING,
-    FLAX_MODEL_FOR_VISION_2_SEQ_MAPPING,
-)
 from ..utils import ModelOutput, logging
+from ..utils.flax_compat import backfill_generation_config_defaults
 from .configuration_utils import GenerationConfig
 from .flax_logits_process import (
     FlaxForcedBOSTokenLogitsProcessor,
@@ -236,11 +232,9 @@ class FlaxGenerationMixin:
         right class to use.
         """
         if not self.can_generate():
-            generate_compatible_mappings = [
-                FLAX_MODEL_FOR_CAUSAL_LM_MAPPING,
-                FLAX_MODEL_FOR_VISION_2_SEQ_MAPPING,
-                FLAX_MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING,
-            ]
+            # The FLAX_MODEL_FOR_* auto mappings were removed in transformers 5.0.0. They only
+            # enriched this error message with alternative class names.
+            generate_compatible_mappings = []
             generate_compatible_classes = set()
             for model_mapping in generate_compatible_mappings:
                 supported_models = model_mapping.get(type(self.config), default=None)
@@ -339,6 +333,7 @@ class FlaxGenerationMixin:
         generation_config = copy.deepcopy(generation_config)
         model_kwargs = generation_config.update(**kwargs)  # All unused kwargs must be model kwargs
         self._validate_model_kwargs(model_kwargs.copy())
+        backfill_generation_config_defaults(generation_config)
 
         logits_processor = logits_processor if logits_processor is not None else FlaxLogitsProcessorList()
 

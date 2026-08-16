@@ -9,12 +9,12 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
+⚠️ Note that this file is in Markdown but contains specific syntax for our doc-builder (similar to MDX) that may not be
 rendered properly in your Markdown viewer.
 
 -->
 
-# Import Utilities
+# Importing utilities
 
 This page goes through the transformers utilities to enable lazy and fast object import.
 While we strive for minimal dependencies, some models have specific dependencies requirements that cannot be
@@ -28,17 +28,17 @@ object for which you are lacking a dependency will error-out when calling any me
 This object is still importable:
 
 ```python
->>> from transformers import DetrImageProcessorFast
->>> print(DetrImageProcessorFast)
-<class 'DetrImageProcessorFast'>
+>>> from transformers import DetrImageProcessor
+>>> print(DetrImageProcessor)
+<class 'DetrImageProcessor'>
 ```
 
 However, no method can be called on that object:
 
 ```python
->>> DetrImageProcessorFast.from_pretrained()
-ImportError: 
-DetrImageProcessorFast requires the Torchvision library but it was not found in your environment. Check out the instructions on the
+>>> DetrImageProcessor.from_pretrained()
+ImportError:
+DetrImageProcessor requires the Torchvision library but it was not found in your environment. Check out the instructions on the
 installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
 Please note that you may need to restart your runtime after installation.
 ```
@@ -51,12 +51,7 @@ Let's see how to specify specific object dependencies.
 
 All objects under a given filename have an automatic dependency to the tool linked to the filename
 
-**TensorFlow**: All files starting with `modeling_tf_` have an automatic TensorFlow dependency.
-
-**Flax**: All files starting with `modeling_flax_` have an automatic Flax dependency
-
-**PyTorch**: All files starting with `modeling_` and not valid with the above (TensorFlow and Flax) have an automatic 
-PyTorch dependency
+**PyTorch**: All files starting with `modeling_` have an automatic PyTorch dependency
 
 **Tokenizers**: All files starting with `tokenization_` and ending with `_fast` have an automatic `tokenizers` dependency
 
@@ -102,3 +97,5 @@ You can specify the following operators: `==`, `>`, `>=`, `<`, `<=`, `!=`.
 [[autodoc]] utils.import_utils.define_import_structure
 
 [[autodoc]] utils.import_utils.requires
+
+[[autodoc]] utils.import_utils.requires_backends

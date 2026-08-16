@@ -23,7 +23,6 @@ from transformers.testing_utils import (
     require_flash_attn,
     require_torch,
     require_torch_large_accelerator,
-    require_torch_large_gpu,
     slow,
     torch_device,
 )
@@ -35,9 +34,6 @@ if is_torch_available():
     import torch
 
     from transformers import (
-        SeedOssForCausalLM,
-        SeedOssForSequenceClassification,
-        SeedOssForTokenClassification,
         SeedOssModel,
     )
 
@@ -46,21 +42,19 @@ class SeedOssModelTester(CausalLMModelTester):
     if is_torch_available():
         base_model_class = SeedOssModel
 
+    def __init__(self, parent):
+        super().__init__(parent=parent)
+        # NOTE(3outeille): must be 0.0 for TP backward tests. In train mode, non-zero dropout causes
+        # different RNG states between the non-TP and TP model forward passes (they run sequentially),
+        # leading to different dropout masks and mismatched losses.
+        self.attention_probs_dropout_prob = 0.0
+        self.attention_dropout = 0.0
+        self.residual_dropout = 0.0
+
 
 @require_torch
 class SeedOssModelTest(CausalLMModelTest, unittest.TestCase):
     model_tester_class = SeedOssModelTester
-    pipeline_model_mapping = (
-        {
-            "feature-extraction": SeedOssModel,
-            "text-classification": SeedOssForSequenceClassification,
-            "token-classification": SeedOssForTokenClassification,
-            "text-generation": SeedOssForCausalLM,
-            "zero-shot": SeedOssForSequenceClassification,
-        }
-        if is_torch_available()
-        else {}
-    )
     _is_stateful = True
     model_split_percents = [0.5, 0.6]
 
@@ -120,7 +114,7 @@ class SeedOssIntegrationTest(unittest.TestCase):
         self.assertEqual(output_text, EXPECTED_TEXTS)
 
     @require_flash_attn
-    @require_torch_large_gpu
+    @require_torch_large_accelerator
     @pytest.mark.flash_attn_test
     def test_model_36b_flash_attn(self):
         EXPECTED_TEXTS = [

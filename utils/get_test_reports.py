@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +15,7 @@
 This util provides a way to manually run the tests of the transformers repo as they would be run by the CI.
 It was mainly used for models tests, so if you find features missing for another suite, do not hesitate to open a PR.
 
-Functionnalities:
+Functionalities:
 - Running specific test suite (models, tokenizers, etc.)
 - Parallel execution across multiple processes (each has to be launched separately with different `--processes` argument)
 - GPU/CPU test filtering and slow tests filter
@@ -33,7 +32,6 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import torch
 
@@ -85,8 +83,8 @@ def handle_suite(
     machine_type: str,
     dry_run: bool,
     tmp_cache: str = "",
-    resume_at: Optional[str] = None,
-    only_in: Optional[list[str]] = None,
+    resume_at: str | None = None,
+    only_in: list[str] | None = None,
     cpu_tests: bool = False,
     process_id: int = 1,
     total_processes: int = 1,

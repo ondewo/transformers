@@ -15,7 +15,7 @@
 
 import unittest
 
-import requests
+import pytest
 
 from transformers import (
     AriaConfig,
@@ -26,7 +26,6 @@ from transformers import (
     AutoTokenizer,
     BitsAndBytesConfig,
     is_torch_available,
-    is_vision_available,
 )
 from transformers.models.idefics3 import Idefics3VisionConfig
 from transformers.testing_utils import (
@@ -42,15 +41,13 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
+from ...test_image_processing_common import load_coco_image, load_test_image
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
 
 
 if is_torch_available():
     import torch
 
-
-if is_vision_available():
-    from PIL import Image
 
 # Used to be https://aria-vl.github.io/static/images/view.jpg but it was removed, llava-vl has the same image
 IMAGE_OF_VIEW_URL = "https://llava-vl.github.io/static/images/view.jpg"
@@ -190,44 +187,43 @@ class AriaForConditionalGenerationModelTest(ModelTesterMixin, GenerationTesterMi
     """
 
     all_model_classes = (AriaModel, AriaForConditionalGeneration) if is_torch_available() else ()
-    test_pruning = False
-    test_head_masking = False
-    test_torchscript = False
+
     _is_composite = True
 
     def setUp(self):
         self.model_tester = AriaVisionText2TextModelTester(self)
         self.config_tester = ConfigTester(self, config_class=AriaConfig, has_text_modality=False)
 
-    @unittest.skip(
+    @pytest.mark.xfail(
         reason="This architecture seems to not compute gradients for the last vision-layernorm because the model uses hidden states pre-norm"
     )
     def test_training_gradient_checkpointing(self):
-        pass
+        super().test_training_gradient_checkpointing()
 
-    @unittest.skip(
-        reason="This architecture seems to not compute gradients for the last vision-layernorm because the model uses hidden states pre-norm"
-    )
-    def test_training_gradient_checkpointing_use_reentrant(self):
-        pass
-
-    @unittest.skip(
+    @pytest.mark.xfail(
         reason="This architecture seems to not compute gradients for the last vision-layernorm because the model uses hidden states pre-norm"
     )
     def test_training_gradient_checkpointing_use_reentrant_false(self):
-        pass
+        super().test_training_gradient_checkpointing_use_reentrant_false()
+
+    @pytest.mark.xfail(
+        reason="This architecture seems to not compute gradients for the last vision-layernorm because the model uses hidden states pre-norm"
+    )
+    def test_training_gradient_checkpointing_use_reentrant_true(self):
+        super().test_training_gradient_checkpointing_use_reentrant_true()
 
 
 SKIP = False
 torch_accelerator_module = getattr(torch, torch_device)
-memory = 23  # skip on T4 / A10
+memory = 48  # skip on devices that cannot fit Aria's non-quantized MoE expert weights
 if hasattr(torch_accelerator_module, "get_device_properties"):
     if torch_accelerator_module.get_device_properties(0).total_memory / 1024**3 < memory:
         SKIP = True
 
 
-@unittest.skipIf(SKIP, reason="A10 doesn't have enough GPU memory for this tests")
+@unittest.skipIf(SKIP, reason="Not enough accelerator memory for Aria integration tests")
 @require_torch
+@slow
 class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
     def setUp(self):
         self.processor = AutoProcessor.from_pretrained("rhymes-ai/Aria")
@@ -236,7 +232,6 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
     def tearDown(self):
         cleanup(torch_device, gc_collect=True)
 
-    @slow
     @require_torch_large_accelerator
     @require_bitsandbytes
     def test_small_model_integration_test(self):
@@ -247,7 +242,7 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
         )
 
         prompt = "<|img|>\nUSER: What are the things I should be cautious about when I visit this place?\nASSISTANT:"
-        raw_image = Image.open(requests.get(IMAGE_OF_VIEW_URL, stream=True).raw)
+        raw_image = load_test_image(IMAGE_OF_VIEW_URL)
         inputs = self.processor(images=raw_image, text=prompt, return_tensors="pt").to(model.device, model.dtype)
 
         non_img_tokens = [
@@ -274,7 +269,6 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
         ).get_expectation()
         self.assertEqual(decoded_output, expected_output)
 
-    @slow
     @require_torch_large_accelerator
     @require_bitsandbytes
     def test_small_model_integration_test_llama_single(self):
@@ -288,7 +282,7 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
         processor = AutoProcessor.from_pretrained(model_id)
 
         prompt = "USER: <|img|>\nWhat are the things I should be cautious about when I visit this place? ASSISTANT:"
-        raw_image = Image.open(requests.get(IMAGE_OF_VIEW_URL, stream=True).raw)
+        raw_image = load_test_image(IMAGE_OF_VIEW_URL)
         inputs = processor(images=raw_image, text=prompt, return_tensors="pt").to(model.device, model.dtype)
 
         output = model.generate(**inputs, max_new_tokens=90, do_sample=False)
@@ -306,7 +300,6 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
             f"Expected: {repr(EXPECTED_DECODED_TEXT)}\nActual: {repr(decoded_output)}",
         )
 
-    @slow
     @require_torch_large_accelerator
     @require_bitsandbytes
     def test_small_model_integration_test_llama_batched(self):
@@ -323,8 +316,8 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
             "USER: <|img|>\nWhat are the things I should be cautious about when I visit this place? What should I bring with me? ASSISTANT:",
             "USER: <|img|>\nWhat is this? ASSISTANT:",
         ]
-        image1 = Image.open(requests.get(IMAGE_OF_VIEW_URL, stream=True).raw)
-        image2 = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
+        image1 = load_test_image(IMAGE_OF_VIEW_URL)
+        image2 = load_coco_image("000000039769.jpg")
 
         inputs = processor(images=[image1, image2], text=prompts, return_tensors="pt", padding=True).to(
             model.device, model.dtype
@@ -348,7 +341,6 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
         decoded_output = processor.batch_decode(output, skip_special_tokens=True)
         self.assertEqual(decoded_output, EXPECTED_DECODED_TEXT)
 
-    @slow
     @require_torch_large_accelerator
     @require_bitsandbytes
     def test_small_model_integration_test_batch(self):
@@ -362,8 +354,8 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
             "USER: <|img|>\nWhat are the things I should be cautious about when I visit this place? What should I bring with me?\nASSISTANT:",
             "USER: <|img|>\nWhat is this?\nASSISTANT:",
         ]
-        image1 = Image.open(requests.get(IMAGE_OF_VIEW_URL, stream=True).raw)
-        image2 = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
+        image1 = load_test_image(IMAGE_OF_VIEW_URL)
+        image2 = load_coco_image("000000039769.jpg")
 
         inputs = self.processor(images=[image1, image2], text=prompts, return_tensors="pt", padding=True).to(
             model.device, model.dtype
@@ -385,7 +377,6 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
         decoded_output = self.processor.batch_decode(output, skip_special_tokens=True)
         self.assertEqual(decoded_output, EXPECTED_DECODED_TEXT)
 
-    @slow
     @require_torch_large_accelerator
     @require_bitsandbytes
     def test_small_model_integration_test_llama_batched_regression(self):
@@ -403,8 +394,8 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
             "USER: <|img|>\nWhat are the things I should be cautious about when I visit this place? What should I bring with me?\nASSISTANT:",
             "USER: <|img|>\nWhat is this?\nASSISTANT: Two cats lying on a bed!\nUSER: <|img|>\nAnd this?\nASSISTANT:",
         ]
-        image1 = Image.open(requests.get(IMAGE_OF_VIEW_URL, stream=True).raw)
-        image2 = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
+        image1 = load_test_image(IMAGE_OF_VIEW_URL)
+        image2 = load_coco_image("000000039769.jpg")
 
         inputs = processor(images=[image1, image2, image1], text=prompts, return_tensors="pt", padding=True)
         inputs = inputs.to(model.device, model.dtype)
@@ -419,7 +410,6 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
         decoded_output = processor.batch_decode(output, skip_special_tokens=True)
         self.assertEqual(decoded_output, EXPECTED_DECODED_TEXT)
 
-    @slow
     @require_torch_large_accelerator
     @require_vision
     @require_bitsandbytes
@@ -437,8 +427,8 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
         prompt3 = "<image>\nUSER: Describe the image.\nASSISTANT:"
         url1 = "https://images.unsplash.com/photo-1552053831-71594a27632d?q=80&w=3062&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D"
         url2 = "https://images.unsplash.com/photo-1617258683320-61900b281ced?q=80&w=3087&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D"
-        image1 = Image.open(requests.get(url1, stream=True).raw)
-        image2 = Image.open(requests.get(url2, stream=True).raw)
+        image1 = load_test_image(url1)
+        image2 = load_test_image(url2)
 
         # Create inputs
         messages = [
@@ -512,7 +502,6 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
         self.assertEqual(slow_tokenizer.tokenize(prompt), EXPECTED_OUTPUT)
         self.assertEqual(fast_tokenizer.tokenize(prompt), EXPECTED_OUTPUT)
 
-    @slow
     @require_torch_large_accelerator
     @require_bitsandbytes
     def test_generation_no_images(self):
@@ -522,7 +511,6 @@ class AriaForConditionalGenerationIntegrationTest(unittest.TestCase):
             quantization_config=BitsAndBytesConfig(load_in_4bit=True, llm_int8_skip_modules=["multihead_attn"]),
         )
         processor = AutoProcessor.from_pretrained(model_id)
-        assert model.device.type == "cuda", "This test is only supported on CUDA"  # TODO: remove this
         # Prepare inputs with no images
         inputs = processor(text="Hello, I am", return_tensors="pt").to(torch_device)
 

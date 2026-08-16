@@ -9,12 +9,12 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
+⚠️ Note that this file is in Markdown but contains specific syntax for our doc-builder (similar to MDX) that may not be
 rendered properly in your Markdown viewer.
 
 -->
 
-# Auto Classes
+# Auto classes
 
 In many cases, the architecture you want to use can be guessed from the name or the path of the pretrained model you
 are supplying to the `from_pretrained()` method. AutoClasses are here to do this job for you so that you
@@ -24,7 +24,7 @@ Instantiating one of [`AutoConfig`], [`AutoModel`], and
 [`AutoTokenizer`] will directly create a class of the relevant architecture. For instance
 
 ```python
-model = AutoModel.from_pretrained("google-bert/bert-base-cased")
+model = AutoModel.from_pretrained("google-bert/bert-base-cased", device_map="auto")
 ```
 
 will create a model that is an instance of [`BertModel`].
@@ -40,6 +40,7 @@ classes like this:
 ```python
 from transformers import AutoConfig, AutoModel
 
+
 AutoConfig.register("new-model", NewModelConfig)
 AutoModel.register(NewModelConfig, NewModel)
 ```
@@ -48,7 +49,7 @@ You will then be able to use the auto classes like you would usually do!
 
 <Tip warning={true}>
 
-If your `NewModelConfig` is a subclass of [`~transformers.PretrainedConfig`], make sure its
+If your `NewModelConfig` is a subclass of [`~transformers.PreTrainedConfig`], make sure its
 `model_type` attribute is set to the same key you use when registering the config (here `"new-model"`).
 
 Likewise, if your `NewModel` is a subclass of [`PreTrainedModel`], make sure its
@@ -149,6 +150,26 @@ The following auto classes are available for the following computer vision tasks
 
 [[autodoc]] AutoModelForDepthEstimation
 
+### AutoModelForNormalEstimation
+
+[[autodoc]] AutoModelForNormalEstimation
+
+### AutoModelForPointmapEstimation
+
+[[autodoc]] AutoModelForPointmapEstimation
+
+### AutoModelForImageMatting
+
+[[autodoc]] AutoModelForImageMatting
+
+### AutoModelForTextRecognition
+
+[[autodoc]] AutoModelForTextRecognition
+
+### AutoModelForTableRecognition
+
+[[autodoc]] AutoModelForTableRecognition
+
 ### AutoModelForImageClassification
 
 [[autodoc]] AutoModelForImageClassification
@@ -156,6 +177,10 @@ The following auto classes are available for the following computer vision tasks
 ### AutoModelForVideoClassification
 
 [[autodoc]] AutoModelForVideoClassification
+
+### AutoModelForPoseEstimation
+
+[[autodoc]] AutoModelForPoseEstimation
 
 ### AutoModelForKeypointDetection
 
@@ -217,6 +242,14 @@ The following auto classes are available for the following audio tasks.
 
 [[autodoc]] AutoModelForCTC
 
+### AutoModelForTDT
+
+[[autodoc]] AutoModelForTDT
+
+### AutoModelForRNNT
+
+[[autodoc]] AutoModelForRNNT
+
 ### AutoModelForSpeechSeq2Seq
 
 [[autodoc]] AutoModelForSpeechSeq2Seq
@@ -241,6 +274,10 @@ The following auto classes are available for the following audio tasks.
 
 The following auto classes are available for the following multimodal tasks.
 
+### AutoModelForMultimodalLM
+
+[[autodoc]] AutoModelForMultimodalLM
+
 ### AutoModelForTableQuestionAnswering
 
 [[autodoc]] AutoModelForTableQuestionAnswering
@@ -252,10 +289,6 @@ The following auto classes are available for the following multimodal tasks.
 ### AutoModelForVisualQuestionAnswering
 
 [[autodoc]] AutoModelForVisualQuestionAnswering
-
-### AutoModelForVision2Seq
-
-[[autodoc]] AutoModelForVision2Seq
 
 ### AutoModelForImageTextToText
 

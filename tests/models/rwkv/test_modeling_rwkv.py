@@ -16,6 +16,8 @@
 import unittest
 from unittest.util import safe_repr
 
+from parameterized import parameterized
+
 from transformers import AutoTokenizer, RwkvConfig, is_torch_available
 from transformers.testing_utils import require_torch, slow, torch_device
 
@@ -84,9 +86,6 @@ class RwkvModelTester:
         self.eos_token_id = vocab_size - 1
         self.pad_token_id = vocab_size - 1
 
-    def get_large_model_config(self):
-        return RwkvConfig.from_pretrained("sgugger/rwkv-4-pile-7b")
-
     def prepare_config_and_inputs(
         self, gradient_checkpointing=False, scale_attn_by_inverse_layer_idx=False, reorder_and_upcast_attn=False
     ):
@@ -122,7 +121,6 @@ class RwkvModelTester:
             config,
             input_ids,
             input_mask,
-            None,
             token_type_ids,
             mc_token_ids,
             sequence_labels,
@@ -157,7 +155,7 @@ class RwkvModelTester:
         config.vocab_size = 300
         return config
 
-    def create_and_check_rwkv_model(self, config, input_ids, input_mask, head_mask, token_type_ids, *args):
+    def create_and_check_rwkv_model(self, config, input_ids, input_mask, token_type_ids, *args):
         config.output_hidden_states = True
         model = RwkvModel(config=config)
         model.to(torch_device)
@@ -168,7 +166,7 @@ class RwkvModelTester:
         self.parent.assertEqual(result.last_hidden_state.shape, (self.batch_size, self.seq_length, self.hidden_size))
         self.parent.assertEqual(len(result.hidden_states), config.num_hidden_layers + 1)
 
-    def create_and_check_causl_lm(self, config, input_ids, input_mask, head_mask, token_type_ids, *args):
+    def create_and_check_causl_lm(self, config, input_ids, input_mask, token_type_ids, *args):
         model = RwkvForCausalLM(config)
         model.to(torch_device)
         model.eval()
@@ -177,7 +175,7 @@ class RwkvModelTester:
         self.parent.assertEqual(result.loss.shape, ())
         self.parent.assertEqual(result.logits.shape, (self.batch_size, self.seq_length, self.vocab_size))
 
-    def create_and_check_state_equivalency(self, config, input_ids, input_mask, head_mask, token_type_ids, *args):
+    def create_and_check_state_equivalency(self, config, input_ids, input_mask, token_type_ids, *args):
         model = RwkvModel(config=config)
         model.to(torch_device)
         model.eval()
@@ -201,7 +199,6 @@ class RwkvModelTester:
             config,
             input_ids,
             input_mask,
-            head_mask,
             token_type_ids,
             mc_token_ids,
             sequence_labels,
@@ -220,11 +217,7 @@ class RwkvModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin
     pipeline_model_mapping = (
         {"feature-extraction": RwkvModel, "text-generation": RwkvForCausalLM} if is_torch_available() else {}
     )
-    fx_compatible = False
     test_missing_keys = False
-    test_model_parallel = False
-    test_pruning = False
-    test_head_masking = False  # Rwkv does not support head masking
 
     def setUp(self):
         self.model_tester = RwkvModelTester(self)
@@ -375,6 +368,22 @@ class RwkvModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin
     @unittest.skip("This model doesn't support padding")
     def test_left_padding_compatibility(self):
         pass
+
+    @unittest.skip("This model doesn't support beam search with cache, as the cache cannot be reordered")
+    def test_beam_search_generate(self):
+        pass
+
+    @unittest.skip("This model doesn't support beam search with cache, as the cache cannot be reordered")
+    def test_beam_sample_generate(self):
+        pass
+
+    @parameterized.expand([("greedy", 1), ("beam search", 2)])
+    def test_generate_from_inputs_embeds(self, _, num_beams):
+        # Skip beam search
+        if num_beams == 2:
+            self.skipTest("This model doesn't support beam search with cache, as the cache cannot be reordered")
+        else:
+            super().test_generate_from_inputs_embeds("greedy", 1)
 
 
 @slow

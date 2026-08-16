@@ -9,7 +9,7 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
+⚠️ Note that this file is in Markdown but contains specific syntax for our doc-builder (similar to MDX) that may not be
 rendered properly in your Markdown viewer.
 
 -->
@@ -116,7 +116,7 @@ from transformers import pipeline
 from transformers.pipelines.pt_utils import KeyDataset
 import datasets
 
-dataset = datasets.load_dataset("imdb", name="plain_text", split="unsupervised")
+dataset = datasets.load_dataset("stanfordnlp/imdb", name="plain_text", split="unsupervised")
 pipe = pipeline("text-classification", device=0)
 for out in pipe(KeyDataset(dataset, "text"), batch_size=8, truncation="only_first"):
     print(out)
@@ -176,7 +176,7 @@ Streaming batch_size=256
 (diminishing returns, saturated the GPU)
 ```
 
-Example where it's most a slowdown:
+Example where it's mostly a slowdown:
 
 ```python
 class MyDataset(Dataset):
@@ -262,11 +262,12 @@ outputs = pipe.postprocess(all_model_outputs)
 This should be very transparent to your code because the pipelines are used in
 the same way.
 
-This is a simplified view, since the pipeline can handle automatically the batch to ! Meaning you don't have to care
+This is a simplified view, since the pipeline can handle automatically the batch to you! Meaning you don't have to care
 about how many forward passes you inputs are actually going to trigger, you can optimize the `batch_size`
 independently of the inputs. The caveats from the previous section still apply.
 
 ## Pipeline FP16 inference
+
 Models can be run in FP16 which can be significantly faster on GPU while saving memory. Most models will not suffer noticeable performance loss from this. The larger the model, the less likely that it will.
 
 To enable FP16 inference, you can simply pass `dtype=torch.float16` or `dtype='float16'` to the pipeline constructor. Note that this only works for models with a PyTorch backend. Your inputs will be converted to FP16 internally.
@@ -334,6 +335,7 @@ Pipelines available for audio tasks include the following.
 Pipelines available for computer vision tasks include the following.
 
 ### DepthEstimationPipeline
+
 [[autodoc]] DepthEstimationPipeline
     - __call__
     - all
@@ -347,12 +349,6 @@ Pipelines available for computer vision tasks include the following.
 ### ImageSegmentationPipeline
 
 [[autodoc]] ImageSegmentationPipeline
-    - __call__
-    - all
-
-### ImageToImagePipeline
-
-[[autodoc]] ImageToImagePipeline
     - __call__
     - all
 
@@ -396,18 +392,6 @@ Pipelines available for natural language processing tasks include the following.
     - __call__
     - all
 
-### QuestionAnsweringPipeline
-
-[[autodoc]] QuestionAnsweringPipeline
-    - __call__
-    - all
-
-### SummarizationPipeline
-
-[[autodoc]] SummarizationPipeline
-    - __call__
-    - all
-
 ### TableQuestionAnsweringPipeline
 
 [[autodoc]] TableQuestionAnsweringPipeline
@@ -425,21 +409,9 @@ Pipelines available for natural language processing tasks include the following.
     - __call__
     - all
 
-### Text2TextGenerationPipeline
-
-[[autodoc]] Text2TextGenerationPipeline
-    - __call__
-    - all
-
 ### TokenClassificationPipeline
 
 [[autodoc]] TokenClassificationPipeline
-    - __call__
-    - all
-
-### TranslationPipeline
-
-[[autodoc]] TranslationPipeline
     - __call__
     - all
 
@@ -471,27 +443,21 @@ Pipelines available for multimodal tasks include the following.
     - __call__
     - all
 
-### ImageToTextPipeline
-
-[[autodoc]] ImageToTextPipeline
-    - __call__
-    - all
-
 ### ImageTextToTextPipeline
 
 [[autodoc]] ImageTextToTextPipeline
     - __call__
     - all
 
-### MaskGenerationPipeline
+### AnyToAnyPipeline
 
-[[autodoc]] MaskGenerationPipeline
+[[autodoc]] AnyToAnyPipeline
     - __call__
     - all
 
-### VisualQuestionAnsweringPipeline
+### MaskGenerationPipeline
 
-[[autodoc]] VisualQuestionAnsweringPipeline
+[[autodoc]] MaskGenerationPipeline
     - __call__
     - all
 

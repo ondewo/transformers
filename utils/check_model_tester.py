@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2023 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,10 +24,6 @@ if __name__ == "__main__":
 
     pattern = os.path.join("tests", "models", "**", "test_modeling_*.py")
     test_files = glob.glob(pattern)
-    # TODO: deal with TF/Flax too
-    test_files = [
-        x for x in test_files if not (x.startswith("test_modeling_tf_") or x.startswith("test_modeling_flax_"))
-    ]
 
     for test_file in test_files:
         tester_classes = get_tester_classes(test_file)

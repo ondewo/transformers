@@ -9,7 +9,7 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
+⚠️ Note that this file is in Markdown but contains specific syntax for our doc-builder (similar to MDX) that may not be
 rendered properly in your Markdown viewer.
 
 -->
@@ -38,7 +38,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, HqqConfig
 
 quant_config = HqqConfig(nbits=8, group_size=64)
-model = transformers.AutoModelForCausalLM.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
     "meta-llama/Llama-3.1-8B", 
     dtype=torch.float16, 
     device_map="auto", 

@@ -25,7 +25,8 @@ from flax.traverse_util import flatten_dict, unflatten_dict
 
 import transformers
 
-from . import is_safetensors_available, is_torch_available
+from . import is_torch_available
+from .utils.flax_compat import is_safetensors_available
 from .utils import check_torch_load_is_safe, logging
 
 

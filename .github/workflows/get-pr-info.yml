@@ -39,6 +39,9 @@ on:
       PR_MERGE_COMMIT_SHA:
         description: "The sha of the merge commit for the pull request (created by GitHub) in the base repository"
         value: ${{ jobs.get-pr-info.outputs.PR_MERGE_COMMIT_SHA }}
+      PR_MERGE_COMMIT_BASE_SHA:
+        description: "The sha of the parent commit of the merge commit on the target branch in the base repository"
+        value: ${{ jobs.get-pr-info.outputs.PR_MERGE_COMMIT_BASE_SHA }}
       PR_HEAD_COMMIT_DATE:
         description: "The date of the head sha of the pull request branch in the head repository"
         value: ${{ jobs.get-pr-info.outputs.PR_HEAD_COMMIT_DATE }}
@@ -59,6 +62,9 @@ on:
         value: ${{ jobs.get-pr-info.outputs.PR_FILES }}
 
 
+permissions:
+  contents: read
+
 jobs:
   get-pr-info:
     runs-on: ubuntu-22.04
@@ -74,6 +80,7 @@ jobs:
       PR_BASE_REF: ${{ steps.pr_info.outputs.base_ref }}
       PR_HEAD_SHA: ${{ steps.pr_info.outputs.head_sha }}
       PR_BASE_SHA: ${{ steps.pr_info.outputs.base_sha }}
+      PR_MERGE_COMMIT_BASE_SHA: ${{ steps.pr_info.outputs.merge_commit_base_sha }}
       PR_MERGE_COMMIT_SHA: ${{ steps.pr_info.outputs.merge_commit_sha }}
       PR_HEAD_COMMIT_DATE: ${{ steps.pr_info.outputs.head_commit_date }}
       PR_MERGE_COMMIT_DATE: ${{ steps.pr_info.outputs.merge_commit_date }}
@@ -85,22 +92,26 @@ jobs:
     steps:
       - name: Extract PR details
         id: pr_info
-        uses: actions/github-script@v6
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
         with:
-          script: |            
+          script: |
+            const pull_number = parseInt(process.env.PR_NUMBER, 10);
+
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: ${{ inputs.pr_number }}
+              pull_number,
             });
 
-            const { data: head_commit }  = await github.rest.repos.getCommit({
+            const { data: head_commit } = await github.rest.repos.getCommit({
               owner: pr.head.repo.owner.login,
               repo: pr.head.repo.name,
               ref: pr.head.ref
             });
 
-            const { data: merge_commit }  = await github.rest.repos.getCommit({
+            const { data: merge_commit } = await github.rest.repos.getCommit({
               owner: pr.base.repo.owner.login,
               repo: pr.base.repo.name,
               ref: pr.merge_commit_sha,
@@ -109,7 +120,7 @@ jobs:
             const { data: files } = await github.rest.pulls.listFiles({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: ${{ inputs.pr_number }}
+              pull_number,
             });
 
             core.setOutput('head_repo_full_name', pr.head.repo.full_name);
@@ -122,6 +133,7 @@ jobs:
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('head_sha', pr.head.sha);
             core.setOutput('base_sha', pr.base.sha);
+            core.setOutput('merge_commit_base_sha', merge_commit.parents[0].sha);
             core.setOutput('merge_commit_sha', pr.merge_commit_sha);
             core.setOutput('pr', pr);
 
@@ -142,16 +154,21 @@ jobs:
               date: merge_commit.commit.committer.date
             });
 
+            console.log('PR Info:', {
+              pr_info: pr
+            });
+
       - name: Convert dates to timestamps
         id: get_timestamps
+        env:
+          head_commit_date: ${{ steps.pr_info.outputs.head_commit_date }}
+          merge_commit_date: ${{ steps.pr_info.outputs.merge_commit_date }}
         run: |
-          head_commit_date=${{ steps.pr_info.outputs.head_commit_date }}
-          merge_commit_date=${{ steps.pr_info.outputs.merge_commit_date }}
-          echo $head_commit_date
-          echo $merge_commit_date
+          echo "$head_commit_date"
+          echo "$merge_commit_date"
           head_commit_timestamp=$(date -d "$head_commit_date" +%s)
           merge_commit_timestamp=$(date -d "$merge_commit_date" +%s)
-          echo $head_commit_timestamp
-          echo $merge_commit_timestamp
+          echo "$head_commit_timestamp"
+          echo "$merge_commit_timestamp"
           echo "head_commit_timestamp=$head_commit_timestamp" >> $GITHUB_OUTPUT
           echo "merge_commit_timestamp=$merge_commit_timestamp" >> $GITHUB_OUTPUT

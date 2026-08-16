@@ -17,7 +17,6 @@ import copy
 import unittest
 
 import pytest
-from parameterized import parameterized
 
 from transformers import (
     PaliGemmaConfig,
@@ -172,11 +171,9 @@ class PaliGemma2ForConditionalGenerationModelTest(ModelTesterMixin, GenerationTe
 
     all_model_classes = (PaliGemmaForConditionalGeneration,) if is_torch_available() else ()
     pipeline_model_mapping = {"image-text-to-text": PaliGemmaForConditionalGeneration}
-    fx_compatible = False
-    test_pruning = False
-    test_torchscript = False
-    test_head_masking = False
+
     _is_composite = True
+    additional_model_inputs = ["token_type_ids"]
 
     def setUp(self):
         self.model_tester = PaliGemma2VisionText2TextModelTester(self)
@@ -192,12 +189,13 @@ class PaliGemma2ForConditionalGenerationModelTest(ModelTesterMixin, GenerationTe
         config, input_dict = self.model_tester.prepare_config_and_inputs_for_common()
         for model_class in self.all_model_classes:
             model = model_class(config).to(torch_device)
+            model.eval()
             curr_input_dict = copy.deepcopy(input_dict)  # in=place modifications further
             _ = model(**curr_input_dict)  # successful forward with no modifications
 
             # remove one image but leave the image token in text
             curr_input_dict["pixel_values"] = curr_input_dict["pixel_values"][-1:, ...]
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "Image features and image tokens do not match"):
                 _ = model(**curr_input_dict)
 
             # simulate multi-image case by concatenating inputs where each has exactly one image/image-token
@@ -206,30 +204,24 @@ class PaliGemma2ForConditionalGenerationModelTest(ModelTesterMixin, GenerationTe
             input_ids = torch.cat([input_ids, input_ids], dim=0)
 
             # one image and two image tokens raise an error
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "Image features and image tokens do not match"):
                 _ = model(input_ids=input_ids, pixel_values=pixel_values)
 
             # two images and two image tokens don't raise an error
             pixel_values = torch.cat([pixel_values, pixel_values], dim=0)
             _ = model(input_ids=input_ids, pixel_values=pixel_values)
 
-    @unittest.skip(
-        reason="This architecture seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
-    )
+    @pytest.mark.xfail(reason="This architecture seems to not compute gradients for some layer.")
     def test_training_gradient_checkpointing(self):
-        pass
+        super().test_training_gradient_checkpointing()
 
-    @unittest.skip(
-        reason="This architecture seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
-    )
-    def test_training_gradient_checkpointing_use_reentrant(self):
-        pass
-
-    @unittest.skip(
-        reason="This architecture seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
-    )
+    @pytest.mark.xfail(reason="This architecture seems to not compute gradients for some layer.")
     def test_training_gradient_checkpointing_use_reentrant_false(self):
-        pass
+        super().test_training_gradient_checkpointing_use_reentrant_false()
+
+    @pytest.mark.xfail(reason="This architecture seems to not compute gradients for some layer.")
+    def test_training_gradient_checkpointing_use_reentrant_true(self):
+        super().test_training_gradient_checkpointing_use_reentrant_true()
 
     @unittest.skip(reason="Some undefined behavior encountered with test versions of this model. Skip for now.")
     def test_cpu_offload(self):
@@ -265,12 +257,6 @@ class PaliGemma2ForConditionalGenerationModelTest(ModelTesterMixin, GenerationTe
         "VLMs need lots of steps to prepare images/mask correctly to get pad-free inputs. Can be tested as part of LLM test"
     )
     def test_flash_attention_2_padding_matches_padding_free_with_position_ids(self):
-        pass
-
-    @parameterized.expand([("random",), ("same",)])
-    @pytest.mark.generate
-    @unittest.skip("Paligemma2 does not seem to be compatible with assisted decoding")
-    def test_assisted_decoding_matches_greedy_search(self, assistant_type):
         pass
 
     @unittest.skip("Paligemma position ids are 1 indexed")

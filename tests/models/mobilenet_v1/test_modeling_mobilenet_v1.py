@@ -34,7 +34,7 @@ if is_torch_available():
 if is_vision_available():
     from PIL import Image
 
-    from transformers import MobileNetV1ImageProcessor
+    from transformers import MobileNetV1ImageProcessorPil
 
 
 class MobileNetV1ConfigTester(ConfigTester):
@@ -150,11 +150,8 @@ class MobileNetV1ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestC
         else {}
     )
 
-    test_pruning = False
     test_resize_embeddings = False
-    test_head_masking = False
     has_attentions = False
-    test_torch_exportable = True
 
     def setUp(self):
         self.model_tester = MobileNetV1ModelTester(self)
@@ -228,7 +225,9 @@ class MobileNetV1ModelIntegrationTest(unittest.TestCase):
     @cached_property
     def default_image_processor(self):
         return (
-            MobileNetV1ImageProcessor.from_pretrained("google/mobilenet_v1_1.0_224") if is_vision_available() else None
+            MobileNetV1ImageProcessorPil.from_pretrained("google/mobilenet_v1_1.0_224")
+            if is_vision_available()
+            else None
         )
 
     @slow

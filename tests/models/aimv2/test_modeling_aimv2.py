@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,7 +18,6 @@ import tempfile
 import unittest
 
 import numpy as np
-import requests
 from parameterized import parameterized
 
 from transformers import Aimv2Config, Aimv2TextConfig, Aimv2VisionConfig
@@ -36,6 +34,7 @@ from transformers.utils import (
 )
 
 from ...test_configuration_common import ConfigTester
+from ...test_image_processing_common import load_coco_image
 from ...test_modeling_common import (
     TEST_EAGER_MATCHES_SDPA_INFERENCE_PARAMETERIZATION,
     ModelTesterMixin,
@@ -59,8 +58,6 @@ if is_torch_available():
 
 
 if is_vision_available():
-    from PIL import Image
-
     from transformers import AutoImageProcessor, AutoProcessor
 
 
@@ -179,16 +176,13 @@ class Aimv2VisionModelTest(Aimv2ModelTesterMixin, unittest.TestCase):
     """
 
     all_model_classes = (Aimv2VisionModel,) if is_torch_available() else ()
-    fx_compatible = False
-    test_pruning = False
+
     test_resize_embeddings = False
-    test_head_masking = False
-    test_torchscript = False
 
     def setUp(self):
         self.model_tester = Aimv2VisionModelTester(self)
         self.config_tester = ConfigTester(
-            self, config_class=Aimv2VisionConfig, has_text_modality=False, hidden_size=37
+            self, config_class=Aimv2VisionConfig, has_text_modality=False, hidden_size=32
         )
 
     def test_config(self):
@@ -310,15 +304,12 @@ class Aimv2TextModelTester:
 @require_torch
 class Aimv2TextModelTest(Aimv2ModelTesterMixin, unittest.TestCase):
     all_model_classes = (Aimv2TextModel,) if is_torch_available() else ()
-    fx_compatible = False
-    test_pruning = False
-    test_head_masking = False
+
     test_resize_embeddings = False
-    test_torchscript = False
 
     def setUp(self):
         self.model_tester = Aimv2TextModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=Aimv2TextConfig, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=Aimv2TextConfig, hidden_size=32)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -354,8 +345,10 @@ class Aimv2ModelTester:
         return config, input_ids, attention_mask, pixel_values
 
     def get_config(self):
-        return Aimv2Config.from_text_vision_configs(
-            self.text_model_tester.get_config(), self.vision_model_tester.get_config(), projection_dim=64
+        return Aimv2Config(
+            text_config=self.text_model_tester.get_config(),
+            vision_config=self.vision_model_tester.get_config(),
+            projection_dim=64,
         )
 
     def create_and_check_model(self, config, input_ids, attention_mask, pixel_values):
@@ -390,10 +383,7 @@ class Aimv2ModelTest(Aimv2ModelTesterMixin, PipelineTesterMixin, unittest.TestCa
         if is_torch_available()
         else {}
     )
-    fx_compatible = False
-    test_head_masking = False
-    test_pruning = False
-    test_torchscript = False
+
     test_resize_embeddings = False
     test_attention_outputs = False
     _is_composite = True
@@ -487,7 +477,7 @@ class Aimv2ModelIntegrationTest(unittest.TestCase):
         model = Aimv2Model.from_pretrained(model_name, device_map=torch_device)
         processor = AutoProcessor.from_pretrained(model_name)
 
-        image = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
+        image = load_coco_image("000000039769.jpg")
         inputs = processor(
             text=["a photo of a cat", "a photo of a dog"], images=image, padding=True, return_tensors="pt"
         ).to(model.device)
@@ -521,7 +511,7 @@ class Aimv2VisionModelIntegrationTests(unittest.TestCase):
         model = Aimv2VisionModel.from_pretrained(model_name, device_map=torch_device)
         processor = AutoImageProcessor.from_pretrained(model_name)
 
-        image = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
+        image = load_coco_image("000000039769.jpg")
         inputs = processor(image, return_tensors="pt").to(model.device)
 
         with torch.no_grad():
@@ -552,7 +542,7 @@ class Aimv2VisionModelIntegrationTests(unittest.TestCase):
         model = Aimv2VisionModel.from_pretrained(model_name, device_map="auto")
         processor = AutoImageProcessor.from_pretrained(model_name)
 
-        image = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
+        image = load_coco_image("000000039769.jpg")
         inputs = processor(image, return_tensors="pt").to(model.device)
 
         with torch.no_grad():

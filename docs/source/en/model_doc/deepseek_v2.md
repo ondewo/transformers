@@ -9,11 +9,11 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
+⚠️ Note that this file is in Markdown but contains specific syntax for our doc-builder (similar to MDX) that may not be
 rendered properly in your Markdown viewer.
 
 -->
-*This model was released on 2024-05-07 and added to Hugging Face Transformers on 2025-07-09.*
+*This model was published in HF papers on 2024-05-07 and contributed to Hugging Face Transformers on 2025-07-09.*
 
 # DeepSeek-V2
 
@@ -28,6 +28,7 @@ This model was contributed by [VladOS95-cyber](https://github.com/VladOS95-cyber
 The original code can be found [here](https://huggingface.co/deepseek-ai/DeepSeek-V2).
 
 ### Usage tips
+
 The model uses Multi-head Latent Attention (MLA) and DeepSeekMoE architectures for efficient inference and cost-effective training. It employs an auxiliary-loss-free strategy for load balancing and multi-token prediction training objective. The model can be used for various language tasks after being pre-trained on 14.8 trillion tokens and going through Supervised Fine-Tuning and Reinforcement Learning stages.
 
 ## DeepseekV2Config

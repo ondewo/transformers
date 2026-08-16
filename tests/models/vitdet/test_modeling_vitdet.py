@@ -164,15 +164,11 @@ class VitDetModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     all_model_classes = (VitDetModel, VitDetBackbone) if is_torch_available() else ()
     pipeline_model_mapping = {"feature-extraction": VitDetModel} if is_torch_available() else {}
 
-    fx_compatible = False
-    test_pruning = False
     test_resize_embeddings = False
-    test_head_masking = False
-    test_torch_exportable = True
 
     def setUp(self):
         self.model_tester = VitDetModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=VitDetConfig, has_text_modality=False, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=VitDetConfig, has_text_modality=False, hidden_size=32)
 
     # TODO: Fix me (once this model gets more usage)
     @unittest.skip(reason="Does not work on the tiny model as we keep hitting edge cases.")

@@ -122,11 +122,8 @@ class MgpstrModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
         if is_torch_available()
         else {}
     )
-    fx_compatible = False
 
-    test_pruning = False
     test_resize_embeddings = False
-    test_head_masking = False
     test_attention_outputs = False
 
     def setUp(self):

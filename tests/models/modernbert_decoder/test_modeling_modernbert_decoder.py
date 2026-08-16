@@ -13,8 +13,6 @@
 # limitations under the License.
 import unittest
 
-from packaging import version
-
 from transformers import AutoTokenizer, is_torch_available
 from transformers.testing_utils import (
     require_torch,
@@ -41,15 +39,6 @@ class ModernBertDecoderModelTester(CausalLMModelTester):
 
 @require_torch
 class ModernBertDecoderModelTest(CausalLMModelTest, unittest.TestCase):
-    pipeline_model_mapping = (
-        {
-            "feature-extraction": ModernBertDecoderModel,
-            "text-generation": ModernBertDecoderForCausalLM,
-            "text-classification": ModernBertDecoderForSequenceClassification,
-        }
-        if is_torch_available()
-        else {}
-    )
     model_tester_class = ModernBertDecoderModelTester
 
 
@@ -57,16 +46,13 @@ class ModernBertDecoderModelTest(CausalLMModelTest, unittest.TestCase):
 @require_torch
 class ModernBertDecoderIntegrationTest(unittest.TestCase):
     def test_inference_causal_lm(self):
-        if version.parse(torch.__version__) < version.parse("2.4.0"):
-            self.skipTest(reason="This test requires torch >= 2.4 to run.")
-
         model = ModernBertDecoderForCausalLM.from_pretrained("blab-jhu/test-32m-dec", attn_implementation="eager")
         tokenizer = AutoTokenizer.from_pretrained("blab-jhu/test-32m-dec")
 
         inputs = tokenizer("Paris is the capital of", return_tensors="pt")
         with torch.no_grad():
             output = model(**inputs)[0]
-        expected_shape = torch.Size((1, 6, model.config.vocab_size))
+        expected_shape = torch.Size((1, 7, model.config.vocab_size))
         self.assertEqual(output.shape, expected_shape)
 
         # compare the actual values for a slice.
@@ -76,16 +62,13 @@ class ModernBertDecoderIntegrationTest(unittest.TestCase):
         torch.testing.assert_close(output[:, :3, :3], expected_slice, rtol=1e-4, atol=1e-4)
 
     def test_inference_no_head(self):
-        if version.parse(torch.__version__) < version.parse("2.4.0"):
-            self.skipTest(reason="This test requires torch >= 2.4 to run.")
-
         model = ModernBertDecoderModel.from_pretrained("blab-jhu/test-32m-dec", attn_implementation="eager")
         tokenizer = AutoTokenizer.from_pretrained("blab-jhu/test-32m-dec")
 
         inputs = tokenizer("Paris is the capital of", return_tensors="pt")
         with torch.no_grad():
             output = model(**inputs)[0]
-        expected_shape = torch.Size((1, 6, model.config.hidden_size))
+        expected_shape = torch.Size((1, 7, model.config.hidden_size))
         self.assertEqual(output.shape, expected_shape)
 
         # compare the actual values for a slice.
@@ -95,9 +78,6 @@ class ModernBertDecoderIntegrationTest(unittest.TestCase):
         torch.testing.assert_close(output[:, :3, :3], expected_slice, rtol=1e-4, atol=1e-4)
 
     def test_generation(self):
-        if version.parse(torch.__version__) < version.parse("2.4.0"):
-            self.skipTest(reason="This test requires torch >= 2.4 to run.")
-
         model = ModernBertDecoderForCausalLM.from_pretrained("blab-jhu/test-32m-dec", attn_implementation="eager")
         tokenizer = AutoTokenizer.from_pretrained("blab-jhu/test-32m-dec")
 
@@ -113,8 +93,6 @@ class ModernBertDecoderIntegrationTest(unittest.TestCase):
         """
         Test that ModernBertDecoder works with sliding window attention for longer sequences.
         """
-        if version.parse(torch.__version__) < version.parse("2.4.0"):
-            self.skipTest(reason="This test requires torch >= 2.4 to run.")
 
         model = ModernBertDecoderForCausalLM.from_pretrained("blab-jhu/test-32m-dec", attn_implementation="eager")
         tokenizer = AutoTokenizer.from_pretrained("blab-jhu/test-32m-dec")
@@ -133,8 +111,6 @@ class ModernBertDecoderIntegrationTest(unittest.TestCase):
         """
         Test that ModernBertDecoderForSequenceClassification works correctly.
         """
-        if version.parse(torch.__version__) < version.parse("2.4.0"):
-            self.skipTest(reason="This test requires torch >= 2.4 to run.")
 
         model = ModernBertDecoderForSequenceClassification.from_pretrained(
             "blab-jhu/test-32m-dec", num_labels=2, attn_implementation="eager"

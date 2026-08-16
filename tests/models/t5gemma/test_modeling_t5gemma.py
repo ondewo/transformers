@@ -19,15 +19,17 @@ import unittest
 
 import pytest
 from parameterized import parameterized
+from pytest import mark
 
 from transformers import T5GemmaConfig, T5GemmaModuleConfig, is_torch_available
 from transformers.testing_utils import (
+    require_flash_attn,
     require_torch,
     require_torch_accelerator,
     torch_device,
 )
 
-from ...generation.test_utils import GenerationTesterMixin, has_similar_generate_outputs
+from ...generation.test_utils import GenerationTesterMixin, assert_similar_generate_outputs
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, ids_tensor
 from ...test_pipeline_mixin import PipelineTesterMixin
@@ -582,18 +584,13 @@ class T5GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi
     pipeline_model_mapping = (
         {
             "feature-extraction": T5GemmaModel,
-            "summarization": T5GemmaForConditionalGeneration,
             "text-classification": T5GemmaForSequenceClassification,
-            "text2text-generation": T5GemmaForConditionalGeneration,
-            "translation": T5GemmaForConditionalGeneration,
             "zero-shot": T5GemmaForSequenceClassification,
         }
         if is_torch_available()
         else {}
     )
 
-    test_headmasking = False
-    test_pruning = False
     _is_stateful = True
     is_encoder_decoder = True
 
@@ -603,7 +600,6 @@ class T5GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi
     _torch_compile_train_attn_implementation = "eager"
 
     # won't fix
-    test_torchscript = False
 
     def setUp(self):
         self.model_tester = T5GemmaModelTester(self)
@@ -611,7 +607,7 @@ class T5GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi
             self,
             config_class=T5GemmaConfig,
             # For faking the testing.
-            hidden_size=37,
+            hidden_size=32,
             vocab_size=self.model_tester.vocab_size,
             num_attention_heads=self.model_tester.num_attention_heads,
             num_hidden_layers=self.model_tester.num_hidden_layers,
@@ -635,6 +631,8 @@ class T5GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi
         return False
 
     def test_config(self):
+        # Skip `create_and_test_config_from_and_save_pretrained_composite` because the config has twice the same subconfig
+        self.config_tester.create_and_test_config_from_and_save_pretrained_composite = lambda: None
         self.config_tester.run_common_tests()
 
     def test_shift_right(self):
@@ -1084,15 +1082,8 @@ class T5GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi
             outputs_cached.scores = full_cached_scores
 
             # The two sets of generated text and past kv should be equal to each other
-            self.assertTrue(has_similar_generate_outputs(outputs, outputs_cached))
-            for layer_idx in range(len(outputs_cached.past_key_values)):
-                for kv_idx in range(len(outputs_cached.past_key_values[layer_idx])):
-                    self.assertTrue(
-                        torch.allclose(
-                            outputs.past_key_values[layer_idx][kv_idx],
-                            outputs_cached.past_key_values[layer_idx][kv_idx],
-                        )
-                    )
+            assert_similar_generate_outputs(outputs, outputs_cached)
+            self._check_caches_are_equal(outputs.past_key_values, outputs_cached.past_key_values)
 
     # Based on tests.test_modeling_common.ModelTesterMixin.test_inputs_embeds_matches_input_ids
     # Update encoder and decoder embeddings
@@ -1277,6 +1268,37 @@ class T5GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi
             # If this does not raise an error, the test passes (see https://github.com/huggingface/transformers/pull/35605)
             _ = model(**dummy_inputs)
 
+    @require_flash_attn
+    @require_torch_accelerator
+    @mark.flash_attn_test
+    def test_generate_beyond_sliding_window_with_flash_attn(self):
+        config, input_ids, _, attention_mask, _, _ = self.model_tester.prepare_config_and_inputs()
+        config.decoder.sliding_window = 2  # arbitrary but less than seq_len
+
+        model = self.model_tester.causal_lm_class(config=config).to(dtype=torch.float16, device=torch_device).eval()
+        model.set_attn_implementation("flash_attention_2")
+
+        # Only generate beyond prefill, we don't care about the output as it only checks for crashes
+        _ = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=2, use_cache=True)
+
+    def test_generate_cross_attention_cache_is_not_sliding(self):
+        # Fast (CPU-friendly, no flash-attn) regression test for the same fix as
+        # `test_generate_beyond_sliding_window_with_flash_attn`: even when the decoder declares sliding-window
+        # layers, `_prepare_cache_for_generation` must build a full-attention cross-attention cache.
+        config, input_ids, _, attention_mask, _, _ = self.model_tester.prepare_config_and_inputs()
+        config.decoder.sliding_window = 2  # arbitrary but less than seq_len
+
+        model = self.model_tester.causal_lm_class(config=config).to(torch_device).eval()
+
+        out = model.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=4,  # beyond the sliding window
+            use_cache=True,
+            return_dict_in_generate=True,
+        )
+        self.assertFalse(any(out.past_key_values.cross_attention_cache.is_sliding))
+
 
 class T5GemmaEncoderOnlyModelTester:
     config_class = T5GemmaConfig
@@ -1459,14 +1481,12 @@ class T5GemmaEncoderOnlyModelTester:
 @require_torch
 class T5GemmaEncoderOnlyModelTest(ModelTesterMixin, unittest.TestCase):
     all_model_classes = (T5GemmaEncoderModel, T5GemmaForTokenClassification) if is_torch_available() else ()
-    test_pruning = False
+
     test_resize_embeddings = False
-    test_headmasking = False
     _is_stateful = True
     is_encoder_decoder = False
 
     # won't fix
-    test_torchscript = False
 
     def setUp(self):
         self.model_tester = T5GemmaEncoderOnlyModelTester(self)
@@ -1474,13 +1494,15 @@ class T5GemmaEncoderOnlyModelTest(ModelTesterMixin, unittest.TestCase):
             self,
             config_class=T5GemmaConfig,
             # For faking the testing.
-            hidden_size=37,
+            hidden_size=32,
             vocab_size=self.model_tester.vocab_size,
             num_attention_heads=self.model_tester.num_attention_heads,
             num_hidden_layers=self.model_tester.num_hidden_layers,
         )
 
     def test_config(self):
+        # Skip `create_and_test_config_from_and_save_pretrained_composite` because the config has twice the same subconfig
+        self.config_tester.create_and_test_config_from_and_save_pretrained_composite = lambda: None
         self.config_tester.run_common_tests()
 
     @unittest.skip("This was not properly written, submodules need the attribute to be overwritten")
@@ -1497,20 +1519,20 @@ class T5GemmaEncoderOnlyModelTest(ModelTesterMixin, unittest.TestCase):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_with_token_classification_head(*config_and_inputs)
 
-    @unittest.skip("No loss in the output of T5GemmaEncoderModel")
+    @unittest.skip(reason="This module does not support standalone training")
     def test_training(self):
         pass
 
-    @unittest.skip("No loss in the output of T5GemmaEncoderModel")
+    @unittest.skip(reason="This module does not support standalone training")
     def test_training_gradient_checkpointing(self):
         pass
 
-    @unittest.skip("No loss in the output of T5GemmaEncoderModel")
-    def test_training_gradient_checkpointing_use_reentrant(self):
+    @unittest.skip(reason="This module does not support standalone training")
+    def test_training_gradient_checkpointing_use_reentrant_false(self):
         pass
 
-    @unittest.skip("No loss in the output of T5GemmaEncoderModel")
-    def test_training_gradient_checkpointing_use_reentrant_false(self):
+    @unittest.skip(reason="This module does not support standalone training")
+    def test_training_gradient_checkpointing_use_reentrant_true(self):
         pass
 
     # Based on tests.test_modeling_common.ModelTesterMixin.test_flex_attention_with_grads

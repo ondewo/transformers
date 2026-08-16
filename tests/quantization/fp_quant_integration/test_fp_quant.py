@@ -16,20 +16,22 @@ import gc
 import tempfile
 import unittest
 
+import torch
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, FPQuantConfig
 from transformers.testing_utils import (
     backend_empty_cache,
     require_accelerate,
     require_fp_quant,
     require_qutlass,
-    require_torch_gpu,
-    require_torch_multi_gpu,
+    require_torch_accelerator,
+    require_torch_multi_accelerator,
     slow,
     torch_device,
 )
 
 
-@require_torch_gpu
+@require_torch_accelerator
 class FPQuantConfigTest(unittest.TestCase):
     def test_to_dict(self):
         """
@@ -53,7 +55,7 @@ class FPQuantConfigTest(unittest.TestCase):
 
 
 @slow
-@require_torch_gpu
+@require_torch_accelerator
 @require_fp_quant
 @require_accelerate
 class FPQuantBaseTest(unittest.TestCase):
@@ -64,7 +66,7 @@ class FPQuantBaseTest(unittest.TestCase):
 
     EXPECTED_OUTPUT = "1 2 3 4 5 6"
 
-    device_map = "cuda"
+    device_map = torch_device
 
     @classmethod
     def getQuantizationConfig(cls):
@@ -77,10 +79,10 @@ class FPQuantBaseTest(unittest.TestCase):
         Setup quantized model
         """
 
-        quantization_config = cls.getQuantizationConfig()
+        cls.quantization_config = cls.getQuantizationConfig()
         cls.tokenizer = AutoTokenizer.from_pretrained(cls.model_name)
         cls.quantized_model = AutoModelForCausalLM.from_pretrained(
-            cls.model_name, device_map=cls.device_map, quantization_config=quantization_config
+            cls.model_name, device_map=cls.device_map, quantization_config=cls.quantization_config
         )
 
     def tearDown(self):
@@ -111,24 +113,25 @@ class FPQuantBaseTest(unittest.TestCase):
             output = model.generate(**input_ids, max_new_tokens=self.max_new_tokens)
             self.assertEqual(self.tokenizer.decode(output[0], skip_special_tokens=True), self.EXPECTED_OUTPUT)
 
-    @require_torch_multi_gpu
-    def test_quantized_model_multi_gpu(self):
+    @require_torch_multi_accelerator
+    def test_quantized_model_multi_accelerator(self):
         """
-        Simple test that checks if the quantized model is working properly with multiple GPUs
-        set CUDA_VISIBLE_DEVICES=0,1 if you have more than 2 GPUs
+        Simple test that checks if the quantized model is working properly with multiple accelerators.
+        Set CUDA_VISIBLE_DEVICES=0,1 if you have more than 2 CUDA GPUs. Or set ZE_AFFINITY_MASK=0,1
+        if you have more than 2 Intel XPUs.
         """
         input_ids = self.tokenizer(self.input_text, return_tensors="pt").to(torch_device)
-        quantization_config = FPQuantConfig()
+
         quantized_model = AutoModelForCausalLM.from_pretrained(
-            self.model_name, device_map="auto", quantization_config=quantization_config
+            self.model_name, device_map="auto", quantization_config=self.quantization_config
         )
         self.assertTrue(set(quantized_model.hf_device_map.values()) == {0, 1})
 
         output = quantized_model.generate(**input_ids, max_new_tokens=self.max_new_tokens)
         self.assertEqual(self.tokenizer.decode(output[0], skip_special_tokens=True), self.EXPECTED_OUTPUT)
 
-    @require_torch_multi_gpu
-    def test_save_pretrained_multi_gpu(self):
+    @require_torch_multi_accelerator
+    def test_save_pretrained_multi_accelerator(self):
         """
         Simple test that checks if the quantized model is working properly after being saved and loaded
         """
@@ -149,15 +152,42 @@ class FPQuantMXFP4PseudoquantTest(FPQuantBaseTest):
     def getQuantizationConfig(cls):
         return FPQuantConfig(forward_dtype="mxfp4", pseudoquantization=True)
 
+    @unittest.skip("Pseudoquant Triton kernels do not support multi-GPU")
+    def test_quantized_model_multi_accelerator(self):
+        pass
 
+    @unittest.skip("Pseudoquant Triton kernels do not support multi-GPU")
+    def test_save_pretrained_multi_accelerator(self):
+        pass
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9,
+    "NVFP4 pseudoquantization requires compute capability >= 9.0 (Hopper or newer)",
+)
 class FPQuantNVFP4PseudoquantTest(FPQuantBaseTest):
     @classmethod
     def getQuantizationConfig(cls):
         return FPQuantConfig(forward_dtype="nvfp4", pseudoquantization=True)
 
+    @unittest.skip("Pseudoquant Triton kernels do not support multi-GPU")
+    def test_quantized_model_multi_accelerator(self):
+        pass
+
+    @unittest.skip("Pseudoquant Triton kernels do not support multi-GPU")
+    def test_save_pretrained_multi_accelerator(self):
+        pass
+
 
 @require_qutlass
 class FPQuantMXFP4Test(FPQuantBaseTest):
+    @classmethod
+    def getQuantizationConfig(cls):
+        return FPQuantConfig(forward_dtype="mxfp4", pseudoquantization=False)
+
+
+@require_qutlass
+class FPQuantNVFP4Test(FPQuantBaseTest):
     @classmethod
     def getQuantizationConfig(cls):
         return FPQuantConfig(forward_dtype="nvfp4", pseudoquantization=False)
@@ -167,7 +197,7 @@ class FPQuantMXFP4Test(FPQuantBaseTest):
 class FPQuantMXFP4GS128Test(FPQuantBaseTest):
     @classmethod
     def getQuantizationConfig(cls):
-        return FPQuantConfig(forward_dtype="nvfp4", pseudoquantization=False, hadamard_group_size=128)
+        return FPQuantConfig(forward_dtype="mxfp4", pseudoquantization=False, hadamard_group_size=128)
 
 
 @require_qutlass

@@ -9,12 +9,12 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
+⚠️ Note that this file is in Markdown but contains specific syntax for our doc-builder (similar to MDX) that may not be
 rendered properly in your Markdown viewer.
 
 -->
 
-# Utilities for Generation
+# Utilities for generation
 
 This page lists all the utility functions used by [`~generation.GenerationMixin.generate`].
 
@@ -153,6 +153,9 @@ generation.
 [[autodoc]] TemperatureLogitsWarper
     - __call__
 
+[[autodoc]] TopHLogitsWarper
+    - __call__
+
 [[autodoc]] TopKLogitsWarper
     - __call__
 
@@ -193,28 +196,6 @@ A [`StoppingCriteria`] can be used to change when to stop generation (other than
 [[autodoc]] EosTokenCriteria
     - __call__
 
-## Constraints
-
-A [`Constraint`] can be used to force the generation to include specific tokens or sequences in the output. Please note that this is exclusively available to our PyTorch implementations.
-
-[[autodoc]] Constraint
-
-[[autodoc]] PhrasalConstraint
-
-[[autodoc]] DisjunctiveConstraint
-
-[[autodoc]] ConstraintListState
-
-## BeamSearch
-
-[[autodoc]] BeamScorer
-    - process
-    - finalize
-
-[[autodoc]] ConstrainedBeamSearchScorer
-    - process
-    - finalize
-
 ## Streamers
 
 [[autodoc]] TextStreamer
@@ -223,13 +204,15 @@ A [`Constraint`] can be used to force the generation to include specific tokens 
 
 [[autodoc]] AsyncTextIteratorStreamer
 
+[[autodoc]] TextDiffusionStreamer
+
 ## Caches
 
 [[autodoc]] CacheLayerMixin
     - update
     - get_seq_length
     - get_mask_sizes
-    - get_max_cache_shape
+    - get_max_length
     - reset
     - reorder_cache
     - lazy_initialization
@@ -262,7 +245,7 @@ A [`Constraint`] can be used to force the generation to include specific tokens 
     - early_initialization
     - get_seq_length
     - get_mask_sizes
-    - get_max_cache_shape
+    - get_max_length
     - reset
     - reorder_cache
     - crop
@@ -270,30 +253,12 @@ A [`Constraint`] can be used to force the generation to include specific tokens 
     - batch_select_indices
 
 [[autodoc]] DynamicCache
-    - to_legacy_cache
-    - from_legacy_cache
-
-[[autodoc]] QuantizedCache
-
-[[autodoc]] QuantoQuantizedCache
-
-[[autodoc]] HQQQuantizedCache
-
-[[autodoc]] OffloadedCache
 
 [[autodoc]] StaticCache
 
-[[autodoc]] OffloadedStaticCache
-
-[[autodoc]] HybridCache
-
-[[autodoc]] HybridChunkedCache
-
-[[autodoc]] SlidingWindowCache
+[[autodoc]] QuantizedCache
 
 [[autodoc]] EncoderDecoderCache
-    - to_legacy_cache
-    - from_legacy_cache
 
 ## Watermark Utils
 

@@ -171,15 +171,11 @@ class VivitModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
         else {}
     )
 
-    test_pruning = False
-    test_torchscript = False
     test_resize_embeddings = False
-    test_head_masking = False
-    test_torch_exportable = True
 
     def setUp(self):
         self.model_tester = VivitModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=VivitConfig, has_text_modality=False, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=VivitConfig, has_text_modality=False, hidden_size=32)
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
         inputs_dict = copy.deepcopy(inputs_dict)
@@ -217,8 +213,7 @@ class VivitModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
             # signature.parameters is an OrderedDict => so arg_names order is deterministic
             arg_names = [*signature.parameters.keys()]
 
-            expected_arg_names = ["pixel_values", "head_mask"]
-            self.assertListEqual(arg_names[:2], expected_arg_names)
+            self.assertEqual(arg_names[0], "pixel_values")
 
     def test_model(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()

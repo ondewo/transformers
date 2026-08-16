@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2022 ABEJA, Inc. and The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,11 +18,10 @@ import json
 import os
 import re
 import sys
-from typing import Optional
 
 import numpy as np
 
-from ...tokenization_utils_fast import PreTrainedTokenizer
+from ...tokenization_python import PreTrainedTokenizer
 from ...utils import logging
 
 
@@ -135,6 +133,7 @@ class GPTNeoXJapaneseTokenizer(PreTrainedTokenizer):
             bos_token=bos_token,
             eos_token=eos_token,
             do_clean_text=do_clean_text,
+            special_tokens_pattern="none",
             **kwargs,
         )
 
@@ -162,7 +161,7 @@ class GPTNeoXJapaneseTokenizer(PreTrainedTokenizer):
         out_string = "".join(tokens).strip()
         return out_string
 
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str]:
+    def save_vocabulary(self, save_directory: str, filename_prefix: str | None = None) -> tuple[str]:
         index = 0
         if os.path.isdir(save_directory):
             vocab_file = os.path.join(
@@ -282,7 +281,7 @@ class SubWordJapaneseTokenizer:
         if clean:
             text = self.clean_text(text)
 
-        def check_simbol(x):
+        def check_symbol(x):
             e = x.encode()
             if len(x) == 1 and len(e) == 2:
                 c = (int(e[0]) << 8) + int(e[1])
@@ -324,7 +323,7 @@ class SubWordJapaneseTokenizer:
             else:
                 end = pos + 1
                 wd = text[pos:end]
-                if check_simbol(wd):
+                if check_symbol(wd):
                     result.append("<KIGOU>")
                 elif checku2e(wd):
                     result.append("<U2000U2BFF>")

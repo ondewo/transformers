@@ -12,42 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import shutil
-import tempfile
 import unittest
 
-from transformers import AutoProcessor, Llama4Processor, PreTrainedTokenizerFast
+from transformers import Llama4Processor
 from transformers.testing_utils import require_vision
-from transformers.utils import is_vision_available
 
 from ...test_processing_common import ProcessorTesterMixin
-
-
-if is_vision_available():
-    from transformers import Llama4ImageProcessorFast
 
 
 @require_vision
 class Llama4ProcessorTest(ProcessorTesterMixin, unittest.TestCase):
     processor_class = Llama4Processor
+    # Tiny processor created with make_tiny_processor.py from "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+    tiny_model_id = "hf-internal-testing/tiny-processor-llama4"
 
     @classmethod
-    def setUpClass(cls):
-        cls.tmpdirname = tempfile.mkdtemp()
+    def _setup_image_processor(cls):
+        # max_patches=1 ensures each image produces exactly 1 tile, so len(pixel_values)==batch_size.
+        # Small size (20×20) keeps tensor allocations minimal.
+        image_processor_class = cls._get_component_class_from_processor("image_processor")
+        return image_processor_class(max_patches=1, size={"height": 20, "width": 20})
 
-        image_processor = Llama4ImageProcessorFast(max_patches=1, size={"height": 20, "width": 20})
-        tokenizer = PreTrainedTokenizerFast.from_pretrained("unsloth/Llama-3.2-11B-Vision-Instruct-unsloth-bnb-4bit")
-        processor_kwargs = cls.prepare_processor_dict()
-        processor = Llama4Processor(image_processor, tokenizer, **processor_kwargs)
-        processor.save_pretrained(cls.tmpdirname)
+    @classmethod
+    def _setup_test_attributes(cls, processor):
         cls.image_token = processor.image_token
-
-    def get_tokenizer(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs).tokenizer
-
-    def get_image_processor(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs).image_processor
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmpdirname)

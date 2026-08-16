@@ -270,8 +270,6 @@ class BrosModelTester:
 
 @require_torch
 class BrosModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
-    test_pruning = False
-    test_torchscript = False
     test_mismatched_shapes = False
 
     all_model_classes = (
@@ -306,7 +304,7 @@ class BrosModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
 
     def setUp(self):
         self.model_tester = BrosModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=BrosConfig, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=BrosConfig, hidden_size=32)
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
         inputs_dict = copy.deepcopy(inputs_dict)
@@ -352,12 +350,6 @@ class BrosModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     @require_torch_multi_gpu
     def test_multi_gpu_data_parallel_forward(self):
         super().test_multi_gpu_data_parallel_forward()
-
-    def test_model_various_embeddings(self):
-        config_and_inputs = self.model_tester.prepare_config_and_inputs()
-        for type in ["absolute", "relative_key", "relative_key_query"]:
-            config_and_inputs[0].position_embedding_type = type
-            self.model_tester.create_and_check_model(*config_and_inputs)
 
     def test_for_token_classification(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()

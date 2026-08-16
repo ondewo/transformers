@@ -1,11 +1,11 @@
-from typing import Optional, Union
-
 import torch
 import torch.nn as nn
 
 from transformers.models.ijepa.configuration_ijepa import IJepaConfig
 
+from ... import initialization as init
 from ...modeling_outputs import BaseModelOutputWithPooling, ImageClassifierOutput
+from ...modeling_utils import PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, torch_int
 from ..vit.modeling_vit import ViTEmbeddings, ViTForImageClassification, ViTModel, ViTPreTrainedModel
@@ -61,11 +61,11 @@ class IJepaEmbeddings(ViTEmbeddings):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        bool_masked_pos: torch.BoolTensor | None = None,
         interpolate_pos_encoding: bool = False,
     ) -> torch.Tensor:
         batch_size, _, height, width = pixel_values.shape
-        embeddings = self.patch_embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
+        embeddings = self.patch_embeddings(pixel_values)
 
         if bool_masked_pos is not None:
             seq_length = embeddings.shape[1]
@@ -78,6 +78,11 @@ class IJepaEmbeddings(ViTEmbeddings):
         if interpolate_pos_encoding:
             embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
         else:
+            if height != self.image_size[0] or width != self.image_size[1]:
+                raise ValueError(
+                    f"Input image size ({height}*{width}) doesn't match model"
+                    f" ({self.image_size[0]}*{self.image_size[1]})."
+                )
             embeddings = embeddings + self.position_embeddings
 
         embeddings = self.dropout(embeddings)
@@ -87,27 +92,18 @@ class IJepaEmbeddings(ViTEmbeddings):
 
 @auto_docstring
 class IJepaPreTrainedModel(ViTPreTrainedModel):
-    def _init_weights(self, module: Union[nn.Linear, nn.Conv2d, nn.LayerNorm]) -> None:
+    @torch.no_grad()
+    def _init_weights(self, module):
         """Initialize the weights"""
+        PreTrainedModel._init_weights(self, module)
         if isinstance(module, (nn.Linear, nn.Conv2d)):
-            # Upcast the input in `fp32` and cast it back to desired `dtype` to avoid
-            # `trunc_normal_cpu` not implemented in `half` issues
-            module.weight.data = nn.init.trunc_normal_(
-                module.weight.data.to(torch.float32), mean=0.0, std=self.config.initializer_range
-            ).to(module.weight.dtype)
+            init.trunc_normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
+                init.zeros_(module.bias)
         elif isinstance(module, IJepaEmbeddings):
-            module.position_embeddings.data = nn.init.trunc_normal_(
-                module.position_embeddings.data.to(torch.float32),
-                mean=0.0,
-                std=self.config.initializer_range,
-            ).to(module.position_embeddings.dtype)
+            init.trunc_normal_(module.position_embeddings, mean=0.0, std=self.config.initializer_range)
             if module.mask_token is not None:
-                module.mask_token.data.zero_()
+                init.zeros_(module.mask_token)
 
 
 class IJepaModel(IJepaPreTrainedModel, ViTModel):
@@ -145,10 +141,9 @@ class IJepaForImageClassification(IJepaPreTrainedModel, ViTForImageClassificatio
 
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        interpolate_pos_encoding: Optional[bool] = None,
+        pixel_values: torch.Tensor | None = None,
+        labels: torch.Tensor | None = None,
+        interpolate_pos_encoding: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> ImageClassifierOutput:
         r"""
@@ -160,7 +155,6 @@ class IJepaForImageClassification(IJepaPreTrainedModel, ViTForImageClassificatio
 
         outputs: BaseModelOutputWithPooling = self.ijepa(
             pixel_values,
-            head_mask=head_mask,
             interpolate_pos_encoding=interpolate_pos_encoding,
             **kwargs,
         )

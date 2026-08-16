@@ -260,7 +260,6 @@ class ConvBertModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase
         {
             "feature-extraction": ConvBertModel,
             "fill-mask": ConvBertForMaskedLM,
-            "question-answering": ConvBertForQuestionAnswering,
             "text-classification": ConvBertForSequenceClassification,
             "token-classification": ConvBertForTokenClassification,
             "zero-shot": ConvBertForSequenceClassification,
@@ -268,12 +267,10 @@ class ConvBertModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase
         if is_torch_available()
         else {}
     )
-    test_pruning = False
-    test_head_masking = False
 
     def setUp(self):
         self.model_tester = ConvBertModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=ConvBertConfig, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=ConvBertConfig, hidden_size=32)
 
     def test_config(self):
         self.config_tester.run_common_tests()

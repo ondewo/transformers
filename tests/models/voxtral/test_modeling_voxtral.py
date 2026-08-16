@@ -13,139 +13,73 @@
 # limitations under the License.
 """Testing suite for the PyTorch Voxtral model."""
 
-import tempfile
 import unittest
+
+import numpy as np
 
 from transformers import (
     AutoProcessor,
+    LlamaConfig,
     VoxtralConfig,
+    VoxtralEncoderConfig,
     VoxtralForConditionalGeneration,
+    VoxtralModel,
     is_torch_available,
 )
 from transformers.testing_utils import (
+    Expectations,
     cleanup,
+    require_mistral_common,
     require_torch,
     slow,
     torch_device,
 )
+from transformers.utils import is_soundfile_available
 
-from ...generation.test_utils import GenerationTesterMixin
-from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
+from ...alm_tester import ALMModelTest, ALMModelTester
 
 
 if is_torch_available():
     import torch
 
 
-class VoxtralModelTester:
-    def __init__(
-        self,
-        parent,
-        ignore_index=-100,
-        audio_token_id=0,
-        seq_length=35,
-        feat_seq_length=60,
-        text_config={
-            "model_type": "llama",
-            "intermediate_size": 36,
-            "initializer_range": 0.02,
-            "hidden_size": 32,
-            "max_position_embeddings": 52,
-            "num_hidden_layers": 2,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 2,
-            "use_labels": True,
-            "use_mrope": False,
-            "vocab_size": 99,
-            "head_dim": 8,
-            "pad_token_id": 1,  # can't be the same as the audio token id
-        },
-        is_training=True,
-        audio_config={
-            "model_type": "voxtral_encoder",
-            "hidden_size": 16,
-            "num_attention_heads": 4,
-            "intermediate_size": 16,
-            "num_hidden_layers": 2,
-            "num_mel_bins": 80,
-            "max_source_positions": 30,
-            "initializer_range": 0.02,
-        },
-    ):
-        self.parent = parent
-        self.ignore_index = ignore_index
-        self.audio_token_id = audio_token_id
-        self.text_config = text_config
-        self.audio_config = audio_config
-        self.seq_length = seq_length
-        self.feat_seq_length = feat_seq_length
+class VoxtralModelTester(ALMModelTester):
+    config_class = VoxtralConfig
+    base_model_class = VoxtralModel
+    conditional_generation_class = VoxtralForConditionalGeneration
+    text_config_class = LlamaConfig
+    audio_config_class = VoxtralEncoderConfig
 
-        self.num_hidden_layers = text_config["num_hidden_layers"]
-        self.vocab_size = text_config["vocab_size"]
-        self.hidden_size = text_config["hidden_size"]
-        self.num_attention_heads = text_config["num_attention_heads"]
-        self.is_training = is_training
+    def __init__(self, parent, **kwargs):
+        # seq_length 35 = BOS + 30 audio + 4 text (keeps column -2 text-only for resize test).
+        kwargs.setdefault("seq_length", 35)
+        # feat_seq_length 60 → conv2(s=2) → 30 audio embeds (Voxtral's encoder does not apply avg_pool
+        # in the forward; projector reshapes to B*30 embeddings).
+        kwargs.setdefault("feat_seq_length", 60)
+        # Encoder asserts input_features.shape[-1] == max_source_positions * 2.
+        kwargs.setdefault("max_source_positions", kwargs["feat_seq_length"] // 2)
+        # Llama needs head_dim
+        kwargs.setdefault("head_dim", 8)
+        super().__init__(parent, **kwargs)
 
-        self.batch_size = 3
-        self.encoder_seq_length = seq_length
-
-    def get_config(self):
-        return VoxtralConfig(
-            text_config=self.text_config,
-            audio_config=self.audio_config,
-            ignore_index=self.ignore_index,
-            audio_token_id=self.audio_token_id,
-        )
-
-    def prepare_config_and_inputs(self):
-        input_features_values = floats_tensor(
-            [
-                self.batch_size,
-                self.audio_config["num_mel_bins"],
-                self.feat_seq_length,
-            ]
-        )
-        config = self.get_config()
-        return config, input_features_values
-
-    def prepare_config_and_inputs_for_common(self):
-        config_and_inputs = self.prepare_config_and_inputs()
-        config, input_features_values = config_and_inputs
-        num_audio_tokens_per_batch_idx = 30
-
-        input_ids = ids_tensor([self.batch_size, self.seq_length], config.text_config.vocab_size - 1) + 1
-        attention_mask = torch.ones(input_ids.shape, dtype=torch.long).to(torch_device)
-        attention_mask[:, :1] = 0
-
-        input_ids[:, 1 : 1 + num_audio_tokens_per_batch_idx] = config.audio_token_id
-        inputs_dict = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "input_features": input_features_values,
-        }
-        return config, inputs_dict
+    def get_audio_embeds_mask(self, audio_mask):
+        # Voxtral encoder only applies conv2 (stride 2); no avg_pool in forward.
+        output_length = (self.feat_seq_length - 1) // 2 + 1
+        return torch.ones([self.batch_size, output_length], dtype=torch.long).to(torch_device)
 
 
 @require_torch
-class VoxtralForConditionalGenerationModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
+class VoxtralForConditionalGenerationModelTest(ALMModelTest, unittest.TestCase):
     """
     Model tester for `VoxtralForConditionalGeneration`.
     """
 
-    all_model_classes = (VoxtralForConditionalGeneration,) if is_torch_available() else ()
+    model_tester_class = VoxtralModelTester
     pipeline_model_mapping = (
-        {"text-to-speech": VoxtralForConditionalGeneration, "audio-text-to-text": VoxtralForConditionalGeneration}
+        {"text-to-speech": VoxtralForConditionalGeneration, "any-to-any": VoxtralForConditionalGeneration}
         if is_torch_available()
         else {}
     )
-    test_pruning = False
-    test_head_masking = False
-    _is_composite = True
-
-    def setUp(self):
-        self.model_tester = VoxtralModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=VoxtralConfig, has_text_modality=False)
 
     @unittest.skip(
         reason="This test does not apply to Voxtral since inputs_embeds corresponding to audio tokens are replaced when input features are provided."
@@ -189,43 +123,6 @@ class VoxtralForConditionalGenerationModelTest(ModelTesterMixin, GenerationTeste
     def test_flash_attention_3_padding_matches_padding_free_with_position_ids_and_fa_kwargs(self):
         pass
 
-    def test_sdpa_can_dispatch_composite_models(self):
-        # overwrite because Voxtral is audio+text model (not vision+text)
-        if not self.has_attentions:
-            self.skipTest(reason="Model architecture does not support attentions")
-
-        if not self._is_composite:
-            self.skipTest(f"{self.all_model_classes[0].__name__} does not support SDPA")
-
-        for model_class in self.all_model_classes:
-            config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-            model = model_class(config)
-
-            with tempfile.TemporaryDirectory() as tmpdirname:
-                model.save_pretrained(tmpdirname)
-                model_sdpa = model_class.from_pretrained(tmpdirname)
-                model_sdpa = model_sdpa.eval().to(torch_device)
-
-                text_attn = "sdpa" if model.language_model._supports_sdpa else "eager"
-                vision_attn = "sdpa" if model.audio_tower._supports_sdpa else "eager"
-
-                # `None` as it is the requested one which will be assigned to each sub-config
-                # Sub-model will dispatch to SDPA if it can (checked below that `SDPA` layers are present)
-                self.assertTrue(model_sdpa.config._attn_implementation == "sdpa")
-                self.assertTrue(model.language_model.config._attn_implementation == text_attn)
-                self.assertTrue(model.audio_tower.config._attn_implementation == vision_attn)
-
-                model_eager = model_class.from_pretrained(tmpdirname, attn_implementation="eager")
-                model_eager = model_eager.eval().to(torch_device)
-                self.assertTrue(model_eager.config._attn_implementation == "eager")
-                self.assertTrue(model_eager.language_model.config._attn_implementation == "eager")
-                self.assertTrue(model_eager.audio_tower.config._attn_implementation == "eager")
-
-                for name, submodule in model_eager.named_modules():
-                    class_name = submodule.__class__.__name__
-                    if "SdpaAttention" in class_name or "SdpaSelfAttention" in class_name:
-                        raise ValueError("The eager model should not have SDPA attention layers")
-
 
 @require_torch
 class VoxtralForConditionalGenerationIntegrationTest(unittest.TestCase):
@@ -265,7 +162,7 @@ class VoxtralForConditionalGenerationIntegrationTest(unittest.TestCase):
         outputs = model.generate(**inputs, do_sample=False, max_new_tokens=500)
         decoded_outputs = self.processor.batch_decode(outputs, skip_special_tokens=True)
         EXPECTED_OUTPUT = [
-            'The audio is a humorous exchange between two individuals, likely friends or acquaintances, about tattoos. Here\'s a breakdown:\n\n1. **Initial Reaction**: One person (let\'s call him A) is surprised to see the other person (let\'s call him B) has a tattoo.\n2. **Curiosity**: A asks B what his tattoo says, and B responds with "sweet."\n3. **Repetition**: This exchange is repeated multiple times, with A asking about B\'s tattoo and B responding with "sweet."\n4. **Clarification**: Eventually, B clarifies that A\'s tattoo says "dude" and A\'s says "sweet."\n5. **Final Insult**: B calls A an "idiot" for not understanding the joke.\n\nThe humor comes from the repetition of the word "sweet" and the confusion about the tattoos\' meanings. The final insult adds a touch of frustration to the exchange.'
+            'The audio is a humorous exchange between two individuals, likely friends or acquaintances, about tattoos. Here\'s a breakdown:\n\n1. **Initial Reaction**: One person (let\'s call him A) is surprised to see the other person (let\'s call him B) has a tattoo. A asks if B has a tattoo, and B confirms.\n\n2. **Tattoo Description**: B then asks A what his tattoo says, and A responds with "sweet." This exchange is repeated multiple times, with B asking A what his tattoo says, and A always responding with "sweet."\n\n3. **Misunderstanding**: B seems to be genuinely curious about the meaning of the tattoo, but A is either not paying attention or not understanding the question. This leads to a series of repetitive responses from A.\n\n4. **Clarification**: Eventually, B clarifies that he wants to know what A\'s tattoo says, not what A thinks B\'s tattoo says. A then realizes his mistake and apologizes.\n\n5. **Final Answer**: B then asks A what his tattoo says, and A finally responds with "dude," which is the actual meaning of his tattoo.\n\n6. **Final Joke**: B then jokes that A\'s tattoo says "sweet," which is a play on words, as "sweet" can also mean "good" or "nice."\n\nThroughout the conversation, there\'s a lot of repetition and misunderstanding, which adds to the humor. The final joke about the tattoo saying "sweet" is a clever twist on the initial confusion.'
         ]
         self.assertEqual(decoded_outputs, EXPECTED_OUTPUT)
 
@@ -298,9 +195,15 @@ class VoxtralForConditionalGenerationIntegrationTest(unittest.TestCase):
         outputs = model.generate(**inputs, do_sample=False, max_new_tokens=500)
         decoded_outputs = self.processor.batch_decode(outputs, skip_special_tokens=True)
 
-        EXPECTED_OUTPUT = [
-            "What can you tell me about this audio?This audio is a farewell address by President Barack Obama, delivered in Chicago. In the speech, he reflects on his eight years in office, highlighting the resilience, hope, and unity of the American people. He acknowledges the diverse perspectives and conversations he had with the public, which kept him honest and inspired. The president also emphasizes the importance of self-government and civic engagement, encouraging Americans to participate in their democracy actively. He expresses optimism about the country's future and looks forward to continuing his work as a citizen. The audio concludes with a heartfelt thank you and a blessing for the United States."
-        ]
+        # fmt: off
+        EXPECTED_OUTPUTS = Expectations(
+            {
+                (None, None): ["What can you tell me about this audio?This audio is a farewell address by President Barack Obama, delivered in Chicago. In the speech, he reflects on his eight years in office, highlighting the resilience, hope, and unity of the American people. He acknowledges the diverse perspectives and conversations he had with the public, which kept him honest and inspired. The president also emphasizes the importance of self-government and civic engagement, encouraging Americans to participate in their democracy actively. He expresses optimism about the country's future and looks forward to continuing his work as a citizen. The audio concludes with a heartfelt thank you and a blessing for the United States."],
+                ("xpu", None): ["What can you tell me about this audio?This audio is a farewell address by President Barack Obama, delivered in Chicago. In the speech, he reflects on his eight years in office, highlighting the resilience, hope, and unity of the American people. He emphasizes the importance of self-government and active citizenship, encouraging listeners to engage in their communities and participate in democracy. The president expresses his optimism about the country's future and his commitment to continuing to serve as a citizen. He concludes the speech with a heartfelt thank you and a blessing for the United States."],
+            }
+        )
+        # fmt: on
+        EXPECTED_OUTPUT = EXPECTED_OUTPUTS.get_expectation()
         self.assertEqual(decoded_outputs, EXPECTED_OUTPUT)
 
     @slow
@@ -482,12 +385,27 @@ class VoxtralForConditionalGenerationIntegrationTest(unittest.TestCase):
         self.assertEqual(decoded_outputs, EXPECTED_OUTPUT)
 
     @slow
+    @require_mistral_common
+    @unittest.skipUnless(is_soundfile_available(), "test requires soundfile")
+    def test_transcription_request_accepts_single_format_for_array_audio(self):
+        processor = AutoProcessor.from_pretrained(self.checkpoint_name)
+        audio = np.zeros(16000, dtype=np.float32)
+
+        inputs = processor.apply_transcription_request(
+            audio=audio, model_id=self.checkpoint_name, sampling_rate=16000, format="wav"
+        )
+
+        self.assertIn("input_features", inputs)
+        self.assertEqual(inputs["input_features"].shape[0], 1)
+
+    @slow
     def test_transcribe_mode_audio_input(self):
         """
         To test transcribe mode of the model, WER evaluation has been run to compare with the declared model performances.
         see https://github.com/huggingface/transformers/pull/39429 PR's descrition.
         disclaimer: Perfect token matching cannot be achieved due to floating-point arithmetic differences between vLLM and Transformers implementations.
         """
+        # test without language detection
         model = VoxtralForConditionalGeneration.from_pretrained(
             self.checkpoint_name, dtype=self.dtype, device_map=torch_device
         )
@@ -502,6 +420,21 @@ class VoxtralForConditionalGenerationIntegrationTest(unittest.TestCase):
         decoded_outputs = self.processor.batch_decode(outputs, skip_special_tokens=True)
 
         EXPECTED_OUTPUT = [
-            "lang:enThis week, I traveled to Chicago to deliver my final farewell address to the nation, following in the tradition of presidents before me. It was an opportunity to say thank you. Whether we've seen eye-to-eye or rarely agreed at all, my conversations with you, the American people, in living rooms and schools, at farms and on factory floors, at diners and on distant military outposts, All these conversations are what have kept me honest, kept me inspired, and kept me going. Every day, I learned from you. You made me a better president, and you made me a better man. Over the course of these eight years, I've seen the goodness, the resilience, and the hope of the American people. I've seen neighbors looking out for each other as we rescued our economy from the worst crisis of our lifetimes. I've hugged cancer survivors who finally know the security of affordable health care. I've seen communities like Joplin rebuild from disaster, and cities like Boston show the world that no terrorist will ever break the American spirit. I've seen the hopeful faces of young graduates and our newest military officers. I've mourned with grieving families searching for answers, and I found grace in a Charleston church. I've seen our scientists help a paralyzed man regain his sense of touch, and our wounded warriors walk again. I've seen our doctors and volunteers rebuild after earthquakes and stop pandemics in their tracks. I've learned from students who are building robots and curing diseases and who will change the world in ways we can't even imagine. I've seen the youngest of children remind us of our obligations to care for our refugees, to work in peace, and above all, to look out for each other. That's what's possible when we come together in the slow, hard, sometimes frustrating, but always vital work of self-government. But we can't take our democracy for granted. All of us, regardless of party, should throw ourselves into the work of citizenship. Not just when there's an election. Not just when our own narrow interest is at stake. But over the full span of a lifetime. If you're tired of arguing with strangers on the Internet, try to talk with one in real life. If something needs fixing, lace up your shoes and do some organizing. If you're disappointed by your elected officials, then grab a clipboard, get some signatures, and run for office yourself. Our success depends on our"
+            "This week, I traveled to Chicago to deliver my final farewell address to the nation, following in the tradition of presidents before me. It was an opportunity to say thank you. Whether we've seen eye-to-eye or rarely agreed at all, my conversations with you, the American people, in living rooms and schools, at farms and on factory floors, at diners and on distant military outposts, All these conversations are what have kept me honest, kept me inspired, and kept me going. Every day, I learned from you. You made me a better president, and you made me a better man. Over the course of these eight years, I've seen the goodness, the resilience, and the hope of the American people. I've seen neighbors looking out for each other as we rescued our economy from the worst crisis of our lifetimes. I've hugged cancer survivors who finally know the security of affordable health care. I've seen communities like Joplin rebuild from disaster, and cities like Boston show the world that no terrorist will ever break the American spirit. I've seen the hopeful faces of young graduates and our newest military officers. I've mourned with grieving families searching for answers, and I found grace in a Charleston church. I've seen our scientists help a paralyzed man regain his sense of touch, and our wounded warriors walk again. I've seen our doctors and volunteers rebuild after earthquakes and stop pandemics in their tracks. I've learned from students who are building robots and curing diseases and who will change the world in ways we can't even imagine. I've seen the youngest of children remind us of our obligations to care for our refugees, to work in peace, and above all, to look out for each other. That's what's possible when we come together in the slow, hard, sometimes frustrating, but always vital work of self-government. But we can't take our democracy for granted. All of us, regardless of party, should throw ourselves into the work of citizenship. Not just when there's an election. Not just when our own narrow interest is at stake. But over the full span of a lifetime. If you're tired of arguing with strangers on the Internet, try to talk with one in real life. If something needs fixing, lace up your shoes and do some organizing. If you're disappointed by your elected officials, then grab a clipboard, get some signatures, and run for office yourself. Our success depends on our"
+        ]
+        self.assertEqual(decoded_outputs, EXPECTED_OUTPUT)
+
+        # test with language detection, i.e. language=None
+        inputs = self.processor.apply_transcription_request(
+            audio="https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/obama.mp3",
+            model_id=self.checkpoint_name,
+        )
+        inputs = inputs.to(torch_device, dtype=self.dtype)
+        outputs = model.generate(**inputs, do_sample=False, max_new_tokens=500)
+
+        decoded_outputs = self.processor.batch_decode(outputs, skip_special_tokens=True)
+
+        EXPECTED_OUTPUT = [
+            "This week, I traveled to Chicago to deliver my final farewell address to the nation, following in the tradition of presidents before me. It was an opportunity to say thank you. Whether we've seen eye-to-eye or rarely agreed at all, my conversations with you, the American people, in living rooms and schools, at farms and on factory floors, at diners and on distant military outposts, All these conversations are what have kept me honest, kept me inspired, and kept me going. Every day, I learned from you. You made me a better president, and you made me a better man. Over the course of these eight years, I've seen the goodness, the resilience, and the hope of the American people. I've seen neighbors looking out for each other as we rescued our economy from the worst crisis of our lifetimes. I've hugged cancer survivors who finally know the security of affordable health care. I've seen communities like Joplin rebuild from disaster, and cities like Boston show the world that no terrorist will ever break the American spirit. I've seen the hopeful faces of young graduates and our newest military officers. I've mourned with grieving families searching for answers, and I found grace in a Charleston church. I've seen our scientists help a paralyzed man regain his sense of touch, and our wounded warriors walk again. I've seen our doctors and volunteers rebuild after earthquakes and stop pandemics in their tracks. I've learned from students who are building robots and curing diseases and who will change the world in ways we can't even imagine. I've seen the youngest of children remind us of our obligations to care for our refugees, to work in peace, and above all, to look out for each other. That's what's possible when we come together in the slow, hard, sometimes frustrating, but always vital work of self-government. But we can't take our democracy for granted. All of us, regardless of party, should throw ourselves into the work of citizenship. Not just when there's an election. Not just when our own narrow interest is at stake. But over the full span of a lifetime. If you're tired of arguing with strangers on the Internet, try to talk with one in real life. If something needs fixing, lace up your shoes and do some organizing. If you're disappointed by your elected officials, then grab a clipboard, get some signatures, and run for office yourself. Our success depends on our"
         ]
         self.assertEqual(decoded_outputs, EXPECTED_OUTPUT)

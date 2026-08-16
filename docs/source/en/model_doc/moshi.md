@@ -13,12 +13,11 @@ specific language governing permissions and limitations under the License.
 rendered properly in your Markdown viewer.
 
 -->
-*This model was released on 2024-09-17 and added to Hugging Face Transformers on 2024-10-16.*
+*This model was published in HF papers on 2024-09-17 and contributed to Hugging Face Transformers on 2024-10-16.*
 
 # Moshi
 
 <div class="flex flex-wrap space-x-1">
-<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
 <img alt="FlashAttention" src="https://img.shields.io/badge/%E2%9A%A1%EF%B8%8E%20FlashAttention-eae0c8?style=flat">
 <img alt="SDPA" src="https://img.shields.io/badge/SDPA-DE3412?style=flat&logo=pytorch&logoColor=white">
 </div>
@@ -64,11 +63,11 @@ Note that each timestamp - i.e each codebook - gets its own set of Linear Layers
 
 It's the audio encoder from Kyutai, that has recently been integrated to transformers, which is used to "tokenize" audio. It has the same use that [`~EncodecModel`] has in [`~MusicgenModel`].
 
-## Tips:
+## Tips
 
 The original checkpoints can be converted using the conversion script `src/transformers/models/moshi/convert_moshi_transformers.py`
 
-### How to use the model:
+### How to use the model
 
 This implementation has two main aims:
 
@@ -113,34 +112,36 @@ To follow the example of the following image, `"Hello, I'm Moshi"` could be tran
 [`MoshiForConditionalGeneration.generate`] then auto-regressively feeds to itself its own audio stream, but since it doesn't have access to the user input stream while using `transformers`, it will thus **assume that the user is producing blank audio**.
 
 ```python
->>> from datasets import load_dataset, Audio
->>> import torch, math
->>> from transformers import MoshiForConditionalGeneration, AutoFeatureExtractor, AutoTokenizer, infer_device
+import math
+
+import torch
+from datasets import Audio, load_dataset
+
+from transformers import AutoFeatureExtractor, AutoTokenizer
 
 
->>> librispeech_dummy = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
->>> feature_extractor = AutoFeatureExtractor.from_pretrained("kyutai/moshiko-pytorch-bf16")
->>> tokenizer = AutoTokenizer.from_pretrained("kyutai/moshiko-pytorch-bf16")
->>> device = infer_device()
->>> dtype = torch.bfloat16
+librispeech_dummy = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
+feature_extractor = AutoFeatureExtractor.from_pretrained("kyutai/moshiko-pytorch-bf16")
+tokenizer = AutoTokenizer.from_pretrained("kyutai/moshiko-pytorch-bf16")
+dtype = torch.bfloat16
 
->>> # prepare user input audio 
->>> librispeech_dummy = librispeech_dummy.cast_column("audio", Audio(sampling_rate=feature_extractor.sampling_rate))
->>> audio_sample = librispeech_dummy[-1]["audio"]["array"]
->>> user_input_values = feature_extractor(raw_audio=audio_sample, sampling_rate=feature_extractor.sampling_rate, return_tensors="pt").to(device=device, dtype=dtype)
+# prepare user input audio
+librispeech_dummy = librispeech_dummy.cast_column("audio", Audio(sampling_rate=feature_extractor.sampling_rate))
+audio_sample = librispeech_dummy[-1]["audio"]["array"]
+user_input_values = feature_extractor(raw_audio=audio_sample, sampling_rate=feature_extractor.sampling_rate, return_tensors="pt").to(device=device, dtype=dtype)
 
->>> # prepare moshi input values - we suppose moshi didn't say anything while the user spoke
->>> moshi_input_values = torch.zeros_like(user_input_values.input_values)
+# prepare moshi input values - we suppose moshi didn't say anything while the user spoke
+moshi_input_values = torch.zeros_like(user_input_values.input_values)
 
->>> # prepare moshi input ids - we suppose moshi didn't say anything while the user spoke
->>> num_tokens = math.ceil(moshi_input_values.shape[-1] * waveform_to_token_ratio)
->>> input_ids = torch.ones((1, num_tokens), device=device, dtype=torch.int64) * tokenizer.encode("<pad>")[0]
+# prepare moshi input ids - we suppose moshi didn't say anything while the user spoke
+num_tokens = math.ceil(moshi_input_values.shape[-1] * waveform_to_token_ratio)
+input_ids = torch.ones((1, num_tokens), device=device, dtype=torch.int64) * tokenizer.encode("<pad>")[0]
 
->>> # generate 25 new tokens (around 2s of audio)
->>> output = model.generate(input_ids=input_ids, user_input_values=user_input_values.input_values, moshi_input_values=moshi_input_values, max_new_tokens=25)
+# generate 25 new tokens (around 2s of audio)
+output = model.generate(input_ids=input_ids, user_input_values=user_input_values.input_values, moshi_input_values=moshi_input_values, max_new_tokens=25)
 
->>> text_tokens = output.sequences
->>> audio_waveforms = output.audio_sequences
+text_tokens = output.sequences
+audio_waveforms = output.audio_sequences
 ```
 
 **2. Model training**
@@ -151,7 +152,7 @@ Once it's done, you can simply forward `text_labels` and `audio_labels` to [`Mos
 
 A training guide will come soon, but user contributions are welcomed!
 
-### How does the model forward the inputs / generate:
+### How does the model forward the inputs / generate
 
 1. The input streams are embedded and combined into `inputs_embeds`.
 

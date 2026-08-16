@@ -14,7 +14,7 @@ rendered properly in your Markdown viewer.
 
 -->
 
-# Visual Question Answering
+# Visual question answering
 
 [[open-in-colab]]
 
@@ -302,31 +302,7 @@ Once training is completed, share your model to the Hub with the [`~Trainer.push
 
 ## Inference
 
-Now that you have fine-tuned a ViLT model, and uploaded it to the 🤗 Hub, you can use it for inference. The simplest
-way to try out your fine-tuned model for inference is to use it in a [`Pipeline`].
-
-```py
->>> from transformers import pipeline
-
->>> pipe = pipeline("visual-question-answering", model="MariaK/vilt_finetuned_200")
-```
-
-The model in this guide has only been trained on 200 examples, so don't expect a lot from it. Let's see if it at least
-learned something from the data and take the first example from the dataset to illustrate inference:
-
-```py
->>> example = dataset[0]
->>> image = Image.open(example['image_id'])
->>> question = example['question']
->>> print(question)
->>> pipe(image, question, top_k=1)
-"Where is he looking?"
-[{'score': 0.5498199462890625, 'answer': 'down'}]
-```
-
-Even though not very confident, the model indeed has learned something. With more examples and longer training, you'll get far better results!
-
-You can also manually replicate the results of the pipeline if you'd like:
+Now that you have fine-tuned a ViLT model, and uploaded it to the 🤗 Hub, you can use it for inference.
 
 1. Take an image and a question, prepare them for the model using the processor from your model.
 2. Forward the result or preprocessing through the model.
@@ -364,12 +340,13 @@ Let's illustrate how you can use this model for VQA. First, let's load the model
 GPU, if available, which we didn't need to do earlier when training, as [`Trainer`] handles this automatically:
 
 ```py
->>> from transformers import AutoProcessor, Blip2ForConditionalGeneration, infer_device
+>>> from transformers import AutoProcessor, Blip2ForConditionalGeneration
+from accelerate import Accelerator
 >>> import torch
 
 >>> processor = AutoProcessor.from_pretrained("Salesforce/blip2-opt-2.7b")
 >>> model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b", dtype=torch.float16)
->>> device = infer_device()
+>>> device = Accelerator().device
 >>> model.to(device)
 ```
 

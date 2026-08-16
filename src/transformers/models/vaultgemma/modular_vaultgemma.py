@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2025 the HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,17 +12,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
 
 import torch
+from huggingface_hub.dataclasses import strict
 
 from ...cache_utils import Cache
+from ...utils import auto_docstring
 from ..gemma2.configuration_gemma2 import Gemma2Config
-from ..gemma2.modeling_gemma2 import Gemma2DecoderLayer, Gemma2ForCausalLM
+from ..gemma2.modeling_gemma2 import Gemma2Attention, Gemma2DecoderLayer, Gemma2ForCausalLM, Gemma2MLP, Gemma2RMSNorm
 
 
+@auto_docstring(checkpoint="google/vaultgemma-1b")
+@strict
 class VaultGemmaConfig(Gemma2Config):
+    r"""
+    query_pre_attn_scalar (`float`, *optional*, defaults to 256):
+        scaling factor used on the attention scores
+    final_logit_softcapping (`float`, *optional*, defaults to 30.0):
+        scaling factor when applying tanh softcapping on the logits.
+    attn_logit_softcapping (`float`, *optional*, defaults to 50.0):
+        scaling factor when applying tanh softcapping on the attention scores.
+
+    ```python
+    >>> from transformers import VaultGemmaModel, VaultGemmaConfig
+    >>> # Initializing a VaultGemma vaultgemma-7b style configuration
+    >>> configuration = VaultGemmaConfig()
+    >>> # Initializing a model from the vaultgemma-7b style configuration
+    >>> model = VaultGemmaModel(configuration)
+    >>> # Accessing the model configuration
+    >>> configuration = model.config
+    ```"""
+
+    use_bidirectional_attention = AttributeError()
+
+
+class VaultGemmaRMSNorm(Gemma2RMSNorm):
     pass
+
+
+class VaultGemmaMLP(Gemma2MLP):
+    pass
+
+
+class VaultGemmaAttention(Gemma2Attention):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config: VaultGemmaConfig, layer_idx: int):
+        super().__init__()
+        self.is_causal = True
 
 
 class VaultGemmaDecoderLayer(Gemma2DecoderLayer):
@@ -36,26 +72,20 @@ class VaultGemmaDecoderLayer(Gemma2DecoderLayer):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        output_attentions: Optional[bool] = False,
-        use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
         **kwargs,
-    ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
-        hidden_states, self_attn_weights = self.self_attn(
+        hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -65,11 +95,7 @@ class VaultGemmaDecoderLayer(Gemma2DecoderLayer):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
-        if output_attentions:
-            outputs += (self_attn_weights,)
-
-        return outputs
+        return hidden_states
 
 
 class VaultGemmaForCausalLM(Gemma2ForCausalLM):

@@ -20,7 +20,7 @@ import unittest
 
 import numpy as np
 
-from transformers import PretrainedConfig, VitsConfig
+from transformers import PreTrainedConfig, VitsConfig
 from transformers.testing_utils import (
     Expectations,
     is_flaky,
@@ -58,7 +58,7 @@ def _config_zero_init(config):
     for key in configs_no_init.__dict__:
         if "_range" in key or "_std" in key or "initializer_factor" in key or "layer_scale" in key:
             setattr(configs_no_init, key, 1e-10)
-        if isinstance(getattr(configs_no_init, key, None), PretrainedConfig):
+        if isinstance(getattr(configs_no_init, key, None), PreTrainedConfig):
             no_init_subconfig = _config_zero_init(getattr(configs_no_init, key))
             setattr(configs_no_init, key, no_init_subconfig)
     return configs_no_init
@@ -160,16 +160,14 @@ class VitsModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
         {"feature-extraction": VitsModel, "text-to-audio": VitsModel} if is_torch_available() else {}
     )
     is_encoder_decoder = False
-    test_pruning = False
-    test_headmasking = False
+
     test_resize_embeddings = False
-    test_head_masking = False
-    test_torchscript = False
+    test_torch_exportable = False  # data-dependent guard in duration predictor
     has_attentions = False
 
     def setUp(self):
         self.model_tester = VitsModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=VitsConfig, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=VitsConfig, hidden_size=32)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -240,9 +238,9 @@ class VitsModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
 
         def check_equivalence(model, tuple_inputs, dict_inputs, additional_kwargs={}):
             with torch.no_grad():
-                set_seed(0)
+                set_seed(42)
                 tuple_output = model(**tuple_inputs, return_dict=False, **additional_kwargs)
-                set_seed(0)
+                set_seed(42)
                 dict_output = model(**dict_inputs, return_dict=True, **additional_kwargs).to_tuple()
 
                 def recursive_check(tuple_object, dict_object):
@@ -326,7 +324,7 @@ class VitsModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
             model.to(torch_device)
             model.eval()
             with torch.no_grad():
-                set_seed(0)
+                set_seed(42)
                 first = model(**self._prepare_for_class(inputs_dict, model_class))[0]
 
             with tempfile.TemporaryDirectory() as tmpdirname:
@@ -341,7 +339,7 @@ class VitsModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
                 model = model_class.from_pretrained(tmpdirname)
                 model.to(torch_device)
                 with torch.no_grad():
-                    set_seed(0)
+                    set_seed(42)
                     second = model(**self._prepare_for_class(inputs_dict, model_class))[0]
 
             if isinstance(first, tuple) and isinstance(second, tuple):
@@ -353,13 +351,13 @@ class VitsModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     # overwrite from test_modeling_common
     def _mock_init_weights(self, module):
         if hasattr(module, "weight") and module.weight is not None:
-            module.weight.data.fill_(3)
+            module.weight.fill_(3)
         if hasattr(module, "weight_g") and module.weight_g is not None:
             module.weight_g.data.fill_(3)
         if hasattr(module, "weight_v") and module.weight_v is not None:
             module.weight_v.data.fill_(3)
         if hasattr(module, "bias") and module.bias is not None:
-            module.bias.data.fill_(3)
+            module.bias.fill_(3)
 
 
 @require_torch

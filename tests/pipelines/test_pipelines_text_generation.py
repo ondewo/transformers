@@ -17,7 +17,6 @@ from unittest.mock import patch
 
 from transformers import (
     MODEL_FOR_CAUSAL_LM_MAPPING,
-    TF_MODEL_FOR_CAUSAL_LM_MAPPING,
     TextGenerationPipeline,
     logging,
     pipeline,
@@ -28,7 +27,6 @@ from transformers.testing_utils import (
     require_accelerate,
     require_torch,
     require_torch_accelerator,
-    require_torch_or_tf,
     torch_device,
 )
 
@@ -36,17 +34,15 @@ from .test_pipelines_common import ANY
 
 
 @is_pipeline_test
-@require_torch_or_tf
+@require_torch
 class TextGenerationPipelineTests(unittest.TestCase):
     model_mapping = MODEL_FOR_CAUSAL_LM_MAPPING
-    tf_model_mapping = TF_MODEL_FOR_CAUSAL_LM_MAPPING
 
     @require_torch
     def test_small_model_pt(self):
         text_generator = pipeline(
             task="text-generation",
             model="hf-internal-testing/tiny-random-LlamaForCausalLM",
-            framework="pt",
             max_new_tokens=10,
         )
         # Using `do_sample=False` to force deterministic output
@@ -76,7 +72,6 @@ class TextGenerationPipelineTests(unittest.TestCase):
         text_generator = pipeline(
             task="text-generation",
             model="hf-internal-testing/tiny-gpt2-with-chatml-template",
-            framework="pt",
         )
         # Using `do_sample=False` to force deterministic output
         chat1 = [
@@ -124,7 +119,6 @@ class TextGenerationPipelineTests(unittest.TestCase):
         text_generator = pipeline(
             task="text-generation",
             model="hf-internal-testing/tiny-gpt2-with-chatml-template",
-            framework="pt",
         )
         # Using `do_sample=False` to force deterministic output
         chat1 = [
@@ -158,7 +152,6 @@ class TextGenerationPipelineTests(unittest.TestCase):
         text_generator = pipeline(
             task="text-generation",
             model="hf-internal-testing/tiny-gpt2-with-chatml-template",
-            framework="pt",
         )
         # Using `do_sample=False` to force deterministic output
         chat1 = [
@@ -206,7 +199,6 @@ class TextGenerationPipelineTests(unittest.TestCase):
         text_generator = pipeline(
             task="text-generation",
             model="hf-internal-testing/tiny-gpt2-with-chatml-template",
-            framework="pt",
         )
 
         dataset = MyDataset()
@@ -228,12 +220,9 @@ class TextGenerationPipelineTests(unittest.TestCase):
 
     @require_torch
     def test_small_chat_model_with_iterator_pt(self):
-        from transformers.pipelines.pt_utils import PipelineIterator
-
         text_generator = pipeline(
             task="text-generation",
             model="hf-internal-testing/tiny-gpt2-with-chatml-template",
-            framework="pt",
         )
 
         # Using `do_sample=False` to force deterministic output
@@ -262,7 +251,6 @@ class TextGenerationPipelineTests(unittest.TestCase):
             yield from [chat1, chat2]
 
         outputs = text_generator(data(), do_sample=False, max_new_tokens=10)
-        assert isinstance(outputs, PipelineIterator)
         outputs = list(outputs)
         self.assertEqual(
             outputs,
@@ -271,6 +259,85 @@ class TextGenerationPipelineTests(unittest.TestCase):
                 [{"generated_text": expected_chat2}],
             ],
         )
+
+    @require_torch
+    def test_small_chat_model_with_response_template_prefix(self):
+        # When the chat template pre-writes the start of the assistant message (here, an
+        # opening <think> block), the pipeline must pass the prompt to `parse_response` as
+        # `prefix=` so that generated text is correctly routed into the prefilled region.
+        text_generator = pipeline(
+            task="text-generation",
+            model="hf-internal-testing/tiny-gpt2-with-chatml-template",
+        )
+        text_generator.tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}{{ '<|im_start|>assistant\n<think>\n' }}{% endif %}"
+        )
+        text_generator.tokenizer.response_template = {
+            "defaults": {"role": "assistant"},
+            "start_anchor": "<|im_start|>assistant\n",
+            "fields": {
+                "thinking": {"open": "<think>", "close": "</think>", "content": "text"},
+                "content": {"close": "<|im_end|>", "content": "text"},
+            },
+        }
+        chat = [
+            {"role": "system", "content": "This is a system message."},
+            {"role": "user", "content": "This is a test"},
+        ]
+        outputs = text_generator(chat, do_sample=False, max_new_tokens=10)
+        parsed_message = outputs[0]["generated_text"][-1]
+        # The tiny model never emits </think>, so everything it generates stays inside the
+        # `thinking` region opened by the chat template in the prompt. Without `prefix=`,
+        # the parser would never see the opening <think> and would mis-route the generated
+        # text into `content` instead.
+        self.assertEqual(parsed_message["role"], "assistant")
+        self.assertIn("thinking", parsed_message)
+        self.assertNotIn("content", parsed_message)
+        self.assertIsInstance(parsed_message["thinking"], str)
+        self.assertGreater(len(parsed_message["thinking"]), 0)
+
+    @require_torch
+    def test_return_full_text_false_with_chat_template(self):
+        """Regression test for #45854: return_full_text=False must not include prompt when using chat template."""
+        text_generator = pipeline(
+            task="text-generation",
+            model="hf-internal-testing/tiny-gpt2-with-chatml-template",
+        )
+        chat = [
+            {"role": "system", "content": "This is a system message."},
+            {"role": "user", "content": "This is a test"},
+        ]
+        outputs = text_generator(chat, do_sample=False, max_new_tokens=10, return_full_text=False)
+        generated = outputs[0]["generated_text"]
+
+        # Must return plain string, not a list of message dicts
+        self.assertIsInstance(generated, str)
+        # Must not contain the prompt content
+        self.assertNotIn("This is a test", generated)
+        self.assertNotIn("This is a system message.", generated)
+
+    @require_torch
+    def test_return_full_text_true_with_chat_template(self):
+        """return_full_text=True (default) must still return full chat list with chat template."""
+        text_generator = pipeline(
+            task="text-generation",
+            model="hf-internal-testing/tiny-gpt2-with-chatml-template",
+        )
+        chat = [
+            {"role": "system", "content": "This is a system message."},
+            {"role": "user", "content": "This is a test"},
+        ]
+        outputs = text_generator(chat, do_sample=False, max_new_tokens=10, return_full_text=True)
+        generated = outputs[0]["generated_text"]
+
+        # Must return list of message dicts including original messages
+        self.assertIsInstance(generated, list)
+        roles = [m["role"] for m in generated]
+        self.assertIn("user", roles)
+        self.assertIn("assistant", roles)
 
     def get_test_pipeline(
         self,
@@ -284,9 +351,6 @@ class TextGenerationPipelineTests(unittest.TestCase):
         text_generator = TextGenerationPipeline(
             model=model,
             tokenizer=tokenizer,
-            feature_extractor=feature_extractor,
-            image_processor=image_processor,
-            processor=processor,
             dtype=dtype,
             max_new_tokens=5,
         )
@@ -372,11 +436,6 @@ class TextGenerationPipelineTests(unittest.TestCase):
             with self.assertRaises((ValueError, AssertionError)):
                 outputs = text_generator("", add_special_tokens=False)
 
-        if text_generator.framework == "tf":
-            # TF generation does not support max_new_tokens, and it's impossible
-            # to control long generation with only max_length without
-            # fancy calculation, dismissing tests for now.
-            self.skipTest(reason="TF generation does not support max_new_tokens")
         # We don't care about infinite range models.
         # They already work.
         # Skip this test for XGLM, since it uses sinusoidal positional embeddings which are resized on-the-fly.
@@ -483,10 +542,7 @@ class TextGenerationPipelineTests(unittest.TestCase):
     def test_pipeline_length_setting_warning(self):
         prompt = """Hello world"""
         text_generator = pipeline("text-generation", model="hf-internal-testing/tiny-random-gpt2", max_new_tokens=5)
-        if text_generator.model.framework == "tf":
-            logger = logging.get_logger("transformers.generation.tf_utils")
-        else:
-            logger = logging.get_logger("transformers.generation.utils")
+        logger = logging.get_logger("transformers.generation.utils")
         logger_msg = "Both `max_new_tokens`"  # The beginning of the message to be checked in this test
 
         # Both are set by the user -> log warning

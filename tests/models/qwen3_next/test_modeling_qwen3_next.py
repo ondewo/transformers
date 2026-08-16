@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,30 +15,34 @@
 import tempfile
 import unittest
 
-import pytest
 from parameterized import parameterized
 
-from transformers import is_torch_available
-from transformers.testing_utils import require_torch, require_torch_multi_gpu, slow, torch_device
+from transformers import DataCollatorWithFlattening, is_torch_available
+from transformers.testing_utils import (
+    require_causal_conv1d,
+    require_flash_linear_attention,
+    require_torch,
+    require_torch_gpu,
+    require_torch_multi_accelerator,
+    slow,
+    torch_device,
+)
 
 
 if is_torch_available():
     import torch
 
     from transformers import (
+        DynamicCache,
         Qwen3NextForCausalLM,
-        Qwen3NextForQuestionAnswering,
-        Qwen3NextForSequenceClassification,
-        Qwen3NextForTokenClassification,
         Qwen3NextModel,
     )
-    from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextDynamicCache
 
 from ...causal_lm_tester import CausalLMModelTest, CausalLMModelTester
-from ...generation.test_utils import has_similar_generate_outputs
 from ...test_modeling_common import (
     TEST_EAGER_MATCHES_SDPA_INFERENCE_PARAMETERIZATION,
     _test_eager_matches_sdpa_inference,
+    ids_tensor,
 )
 
 
@@ -49,6 +52,11 @@ class Qwen3NextModelTester(CausalLMModelTester):
 
     def __init__(self, parent):
         super().__init__(parent=parent)
+        # NOTE(3outeille): must be 0.0 for TP backward tests. In train mode, non-zero dropout causes
+        # different RNG states between the non-TP and TP model forward passes (they run sequentially),
+        # leading to different dropout masks and mismatched losses.
+        self.attention_probs_dropout_prob = 0.0
+        self.hidden_act = "silu"
         self.layer_types = ["linear_attention", "full_attention"]
         self.linear_conv_kernel_dim = 2
         self.linear_key_head_dim = 16
@@ -59,175 +67,27 @@ class Qwen3NextModelTester(CausalLMModelTester):
 
 @require_torch
 class Qwen3NextModelTest(CausalLMModelTest, unittest.TestCase):
-    pipeline_model_mapping = (
-        {
-            "feature-extraction": Qwen3NextModel,
-            "text-classification": Qwen3NextForSequenceClassification,
-            "token-classification": Qwen3NextForTokenClassification,
-            "text-generation": Qwen3NextForCausalLM,
-            "question-answering": Qwen3NextForQuestionAnswering,
-        }
-        if is_torch_available()
-        else {}
-    )
-
     model_tester_class = Qwen3NextModelTester
 
-    def _check_past_key_values_for_generate(self, batch_size, decoder_past_key_values, cache_length, config):
-        "Qwen3-Next has a special Cache as it alternates with gated deltanet layers"
-        self.assertIsInstance(decoder_past_key_values, Qwen3NextDynamicCache)
+    def _get_conv_state_shape(self, batch_size: int, config):
+        num_v_heads = config.linear_num_value_heads
+        num_k_heads = config.linear_num_key_heads
+        head_k_dim = config.linear_key_head_dim
+        head_v_dim = config.linear_value_head_dim
+        intermediate_size = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
 
-        # (batch, head, seq_length, head_features)
-        expected_shape = (
-            batch_size,
-            config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.num_attention_heads,
-            cache_length,
-            config.hidden_size // config.num_attention_heads,
-        )
+        return (batch_size, intermediate_size, config.linear_conv_kernel_dim)
 
-        attention_layer_indices = decoder_past_key_values.transformer_layers
-        self.assertListEqual(
-            [decoder_past_key_values.key_cache[idx].shape for idx in attention_layer_indices],
-            [expected_shape] * len(attention_layer_indices),
-        )
-        self.assertListEqual(
-            [decoder_past_key_values.value_cache[idx].shape for idx in attention_layer_indices],
-            [expected_shape] * len(attention_layer_indices),
-        )
+    def _get_recurrent_state_shape(self, batch_size: int, config):
+        num_v_heads = config.linear_num_value_heads
+        head_k_dim = config.linear_key_head_dim
+        head_v_dim = config.linear_value_head_dim
 
-    @pytest.mark.generate
-    def test_past_key_values_format(self):
-        "Needs to be overwritten as Qwen3-Next alternates between attention layers and gated deltanet layers."
-        for model_class in self.all_generative_model_classes:
-            config, inputs = self.model_tester.prepare_config_and_inputs_for_common()
+        return (batch_size, num_v_heads, head_k_dim, head_v_dim)
 
-            model = model_class(config).to(torch_device)
-            model = model.eval()
-            if "use_cache" not in inputs:
-                inputs["use_cache"] = True
-            outputs = model(**inputs)
-
-            past_kv = outputs["past_key_values"]
-
-            num_query_attention_heads = config.num_attention_heads
-            embed_dim = config.hidden_size
-            per_head_embed_dim = embed_dim // num_query_attention_heads
-            num_key_value_heads = getattr(config, "num_key_value_heads", num_query_attention_heads)
-
-            batch_size, seq_length = inputs["input_ids"].shape[:2]
-            default_self_attention_shape = (batch_size, num_key_value_heads, seq_length, per_head_embed_dim)
-
-            num_cache_decoder_layers = len(past_kv)
-            self.assertEqual(num_cache_decoder_layers, config.num_hidden_layers)
-
-            for i in range(config.num_hidden_layers):
-                if config.layer_types[i] == "full_attention":
-                    self_attention_layer_keys = past_kv.key_cache[i]
-                    self_attention_layer_values = past_kv.value_cache[i]
-                    self.assertEqual(self_attention_layer_keys.shape, default_self_attention_shape)
-                    self.assertEqual(self_attention_layer_values.shape, default_self_attention_shape)
-
-    @pytest.mark.generate
-    def test_generate_continue_from_past_key_values(self):
-        "Needs to be overwritten as Qwen3-Next has non-standard cache."
-        # Tests that we can continue generating from past key values, returned from a previous `generate` call
-        for model_class in self.all_generative_model_classes:
-            config, inputs = self.model_tester.prepare_config_and_inputs_for_common()
-            model = model_class(config).to(torch_device)
-            model.eval()
-
-            generate_kwargs = {
-                "pad_token_id": -1,
-                "eos_token_id": -1,
-                "forced_eos_token_id": None,
-                "encoder_no_repeat_ngram_size": 0,
-                "use_cache": True,
-                "do_sample": False,
-                "return_dict_in_generate": True,
-                "output_scores": True,
-            }
-
-            # Traditional way of generating text, with `return_dict_in_generate` to return the past key values
-            outputs = model.generate(**inputs, **generate_kwargs, max_new_tokens=4)
-            # Let's generate again, but passing the past key values in between (3 + 1 = 4 tokens). Note that the
-            # inputs may need to be tweaked across `generate` calls (like the attention mask).
-            outputs_cached = model.generate(**inputs, **generate_kwargs, max_new_tokens=3)
-
-            # Continue from the tokens generated above, preparing the inputs accordingly
-            inputs["past_key_values"] = outputs_cached.past_key_values
-            new_attention_len = outputs_cached.sequences.shape[-1]
-
-            inputs["input_ids"] = outputs_cached.sequences
-            if "attention_mask" in inputs:
-                inputs["attention_mask"] = torch.nn.functional.pad(
-                    inputs["attention_mask"],
-                    (0, new_attention_len - inputs["attention_mask"].shape[1]),
-                    mode="constant",
-                    value=1,
-                )
-            first_caches_scores = outputs_cached.scores
-            outputs_cached = model.generate(**inputs, **generate_kwargs, max_new_tokens=1)
-            full_cached_scores = first_caches_scores + outputs_cached.scores
-            outputs_cached.scores = full_cached_scores
-
-            # The two sets of generated text and past kv should be equal to each other
-            self.assertTrue(has_similar_generate_outputs(outputs, outputs_cached))
-            for layer_idx in range(len(outputs_cached.past_key_values)):
-                for kv_idx in range(len(outputs_cached.past_key_values[layer_idx])):
-                    # Diff with the main test: we need to skip layers where it stays None
-                    if outputs.past_key_values[layer_idx][kv_idx] is not None:
-                        self.assertTrue(
-                            torch.allclose(
-                                outputs.past_key_values[layer_idx][kv_idx],
-                                outputs_cached.past_key_values[layer_idx][kv_idx],
-                            )
-                        )
-
-    @pytest.mark.generate
-    def test_generate_continue_from_inputs_embeds(self):
-        "Needs to be overwritten as Qwen3-Next has non-standard cache."
-        for model_class in self.all_generative_model_classes:
-            config, inputs_dict = self.prepare_config_and_inputs_for_generate()
-            model = model_class(config).to(torch_device).eval()
-            input_ids = inputs_dict.pop("input_ids")
-            model.generation_config.pad_token_id = model.generation_config.eos_token_id = -1
-            model.generation_config.forced_eos_token_id = None
-            model.config.is_decoder = True
-            model.generation_config.use_cache = True
-
-            generation_kwargs = {
-                "return_dict_in_generate": True,
-                "do_sample": False,
-            }
-
-            # Traditional way of generating text, with `return_dict_in_generate` to return the past key values.
-            input_embeds = model.get_input_embeddings()(input_ids)
-            outputs = model.generate(inputs_embeds=input_embeds, max_new_tokens=4, **generation_kwargs)
-
-            # Let's generate again, but passing the past key values in between (3 + 1 = 4 tokens)
-            initial_output = model.generate(inputs_embeds=input_embeds, max_new_tokens=3, **generation_kwargs)
-            continued_embeds = torch.cat([input_embeds, model.get_input_embeddings()(initial_output.sequences)], dim=1)
-            cached_output = model.generate(
-                inputs_embeds=continued_embeds,
-                max_new_tokens=1,
-                past_key_values=initial_output.past_key_values,
-                **generation_kwargs,
-            )
-
-            # Combine the (3 + 1) generated tokens and verify it matches with full generation.
-            combined_output_sequences = torch.concat([initial_output.sequences, cached_output.sequences], axis=1)
-            self.assertListEqual(outputs.sequences.tolist(), combined_output_sequences.tolist())
-            # The two sets of past kv should be equal to each other
-            for layer_idx in range(len(cached_output.past_key_values)):
-                for kv_idx in range(len(cached_output.past_key_values[layer_idx])):
-                    # Diff with the main test: we need to skip layers where it stays None
-                    if outputs.past_key_values[layer_idx][kv_idx] is not None:
-                        self.assertTrue(
-                            torch.allclose(
-                                outputs.past_key_values[layer_idx][kv_idx],
-                                cached_output.past_key_values[layer_idx][kv_idx],
-                            )
-                        )
+    @unittest.skip("Qwen3-Next hybrid linear-attention cache is not compatible with quantized cache yet.")
+    def test_generate_with_quant_cache(self):
+        pass
 
     def test_attention_outputs(self):
         "Needs to be overwritten as Qwen3-Next alternates between attention layers and gated deltanet layers."
@@ -277,6 +137,92 @@ class Qwen3NextModelTest(CausalLMModelTest, unittest.TestCase):
             self.assertEqual(len(self_attentions), sum(layer == "full_attention" for layer in config.layer_types))
             self.assertListEqual(list(self_attentions[0].shape[-3:]), [config.num_attention_heads, seq_len, seq_len])
 
+    def test_linear_attention_multi_token_cached_forward_matches_single_token(self):
+        """
+        Qwen3-Next's gated-delta-net layers must produce the same output for a token regardless of
+        whether it's fed as a single-token cached forward or as the first token of a multi-token chunk
+        after the cache has been populated (chunked-prefill continuation / speculative verification).
+        A causal LM's logits at position `i` cannot depend on tokens at positions > `i`, even across
+        separate forward calls with a shared cache.
+        """
+        config, _ = self.model_tester.prepare_config_and_inputs_for_common()
+        config._attn_implementation = "eager"
+        # GatedDeltaNet's fused norm-gate kernel only supports silu/swish/sigmoid; the shared tester
+        # default `gelu` would raise before exercising the cache path.
+        config.hidden_act = "silu"
+        model = Qwen3NextModel._from_config(config)
+        model.to(torch_device)
+        model.eval()
+
+        prefill_len = 8
+        prompt = ids_tensor((1, prefill_len), config.vocab_size).to(torch_device)
+        next_token = ids_tensor((1, 1), config.vocab_size).to(torch_device)
+
+        # Reference: prefill, then forward the next token alone with the populated cache.
+        cache_single = DynamicCache(config=config)
+        with torch.no_grad():
+            model(input_ids=prompt, past_key_values=cache_single, use_cache=True)
+            single_out = model(input_ids=next_token, past_key_values=cache_single, use_cache=True)
+        ref_first = single_out.last_hidden_state[:, 0, :]
+
+        # Under test: prefill, then forward [next_token, *distractors] in one call. The first
+        # position must match the single-token forward exactly (causal attention).
+        distractors = ids_tensor((1, 7), config.vocab_size).to(torch_device)
+        multi_input = torch.cat([next_token, distractors], dim=1)
+        cache_multi = DynamicCache(config=config)
+        with torch.no_grad():
+            model(input_ids=prompt, past_key_values=cache_multi, use_cache=True)
+            multi_out = model(input_ids=multi_input, past_key_values=cache_multi, use_cache=True)
+        under_test_first = multi_out.last_hidden_state[:, 0, :]
+
+        torch.testing.assert_close(under_test_first, ref_first, rtol=1e-4, atol=1e-4)
+
+    @require_causal_conv1d
+    @require_flash_linear_attention
+    @require_torch_gpu
+    def test_padding_free_matches_padded_fast_path_regression(self):
+        torch.manual_seed(0)
+        config = self.model_tester.get_config()
+        model = Qwen3NextForCausalLM(config).to(torch_device).eval()
+
+        data_collator = DataCollatorWithFlattening(
+            return_tensors="pt", return_seq_idx=True, return_flash_attn_kwargs=True
+        )
+        test_cases = [
+            (
+                torch.tensor([[0, 0, 0, 1, 2, 3], [0, 0, 0, 0, 4, 5]], device=torch_device),
+                torch.tensor([[0, 0, 0, 1, 1, 1], [0, 0, 0, 0, 1, 1]], dtype=torch.long, device=torch_device),
+                [{"input_ids": [1, 2, 3]}, {"input_ids": [4, 5]}],
+            ),
+            (
+                torch.tensor([[0, 1, 2, 3, 4, 5], [0, 0, 0, 0, 0, 6]], device=torch_device),
+                torch.tensor([[0, 1, 1, 1, 1, 1], [0, 0, 0, 0, 0, 1]], dtype=torch.long, device=torch_device),
+                [{"input_ids": [1, 2, 3, 4, 5]}, {"input_ids": [6]}],
+            ),
+        ]
+
+        for padded_input_ids, attention_mask, features in test_cases:
+            position_ids = ((attention_mask == 1).long().cumsum(dim=1) - 1) * (attention_mask == 1).long()
+            padding_free_batch = data_collator(features)
+            padding_free_batch = {
+                key: value.to(torch_device) if torch.is_tensor(value) else value
+                for key, value in padding_free_batch.items()
+            }
+
+            with torch.no_grad():
+                res_padded = model(
+                    input_ids=padded_input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=False,
+                )
+                res_padfree = model(**padding_free_batch, use_cache=False)
+
+            logits_padded = res_padded.logits[attention_mask.bool()]
+            logits_padfree = res_padfree.logits[0]
+
+            torch.testing.assert_close(logits_padded, logits_padfree, atol=1e-5, rtol=1e-5)
+
     @parameterized.expand(TEST_EAGER_MATCHES_SDPA_INFERENCE_PARAMETERIZATION)
     def test_eager_matches_sdpa_inference(
         self,
@@ -307,11 +253,11 @@ class Qwen3NextModelTest(CausalLMModelTest, unittest.TestCase):
     def test_multi_gpu_data_parallel_forward(self):
         pass
 
-    @require_torch_multi_gpu
+    @require_torch_multi_accelerator
     def test_can_use_device_map(self):
         """
-        Test that this model can be dispatched on multiple gpus. It's not obvious as the Cache is not standard,
-        ant each layer need to use the correct device on which it reside (i.e. it needs to be lazy initialized).
+        Test that this model can be dispatched on multiple accelerators. It's not obvious as the Cache is not standard,
+        and each layer need to use the correct device on which it reside (i.e. it needs to be lazy initialized).
         """
         for model_class in self.all_generative_model_classes:
             config, inputs_dict = self.prepare_config_and_inputs_for_generate()

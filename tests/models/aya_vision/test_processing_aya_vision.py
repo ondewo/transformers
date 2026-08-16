@@ -12,13 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import shutil
-import tempfile
 import unittest
 
-from transformers import AutoProcessor, AutoTokenizer, AyaVisionProcessor
+from transformers import AyaVisionProcessor
 from transformers.testing_utils import require_torch, require_vision
-from transformers.utils import is_torch_available, is_vision_available
+from transformers.utils import is_torch_available
 
 from ...test_processing_common import ProcessorTesterMixin, url_to_local_path
 
@@ -27,19 +25,20 @@ if is_torch_available():
     import torch
 
 
-if is_vision_available():
-    from transformers import GotOcr2ImageProcessor
-
-
 @require_vision
 class AyaVisionProcessorTest(ProcessorTesterMixin, unittest.TestCase):
     processor_class = AyaVisionProcessor
+    # Tiny processor created with make_tiny_processor.py from "CohereForAI/aya-vision-8b"
+    tiny_model_id = "hf-internal-testing/tiny-processor-aya_vision"
 
     @classmethod
-    def setUpClass(cls):
-        cls.tmpdirname = tempfile.mkdtemp()
+    def _setup_test_attributes(cls, processor):
+        cls.image_token = processor.image_token
 
-        image_processor = GotOcr2ImageProcessor(
+    @classmethod
+    def _setup_image_processor(cls):
+        image_processor_class = cls._get_component_class_from_processor("image_processor")
+        return image_processor_class(
             do_resize=True,
             size={"height": 20, "width": 20},
             max_patches=2,
@@ -50,37 +49,15 @@ class AyaVisionProcessorTest(ProcessorTesterMixin, unittest.TestCase):
             image_std=[0.229, 0.224, 0.225],
             do_convert_rgb=True,
         )
-        tokenizer = AutoTokenizer.from_pretrained(
-            "hf-internal-testing/namespace-CohereForAI-repo_name_aya-vision-8b", padding_side="left"
-        )
-        processor_kwargs = cls.prepare_processor_dict()
-        processor = AyaVisionProcessor.from_pretrained(
-            "hf-internal-testing/namespace-CohereForAI-repo_name_aya-vision-8b",
-            image_processor=image_processor,
-            tokenizer=tokenizer,
-            **processor_kwargs,
-        )
-        processor.save_pretrained(cls.tmpdirname)
-        cls.image_token = processor.image_token
 
     @staticmethod
     def prepare_processor_dict():
         return {"patch_size": 10, "img_size": 20}
 
-    def get_tokenizer(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs).tokenizer
+    @unittest.skip(reason="Text needs image tokens, tested in other tests")
+    def test_processor_with_multiple_inputs(self):
+        pass
 
-    def get_image_processor(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs).image_processor
-
-    def get_processor(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs)
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmpdirname, ignore_errors=True)
-
-    # Copied from tests.models.llava.test_processing_llava.LlavaProcessorTest.test_get_num_vision_tokens
     def test_get_num_vision_tokens(self):
         "Tests general functionality of the helper used internally in vLLM"
 
@@ -105,13 +82,13 @@ class AyaVisionProcessorTest(ProcessorTesterMixin, unittest.TestCase):
                         {
                             "type": "image",
                             "url": url_to_local_path(
-                                "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
+                                "https://huggingface.co/datasets/hf-internal-testing/test-videos/resolve/main/statue_of_liberty_64x64.jpg"
                             ),
                         },
                         {
                             "type": "image",
                             "url": url_to_local_path(
-                                "https://thumbs.dreamstime.com/b/golden-gate-bridge-san-francisco-purple-flowers-california-echium-candicans-36805947.jpg"
+                                "https://huggingface.co/datasets/hf-internal-testing/test-videos/resolve/main/golden_gate_64x64.jpg"
                             ),
                         },
                         {"type": "text", "text": "What are the differences between these two images?"},
@@ -124,7 +101,9 @@ class AyaVisionProcessorTest(ProcessorTesterMixin, unittest.TestCase):
                     "content": [
                         {
                             "type": "image",
-                            "url": url_to_local_path("https://llava-vl.github.io/static/images/view.jpg"),
+                            "url": url_to_local_path(
+                                "https://huggingface.co/datasets/hf-internal-testing/test-videos/resolve/main/view_64x64.jpg"
+                            ),
                         },
                         {"type": "text", "text": "Write a haiku for this image"},
                     ],
@@ -163,3 +142,25 @@ class AyaVisionProcessorTest(ProcessorTesterMixin, unittest.TestCase):
                 ],
             )
             images_patches_index += inputs["pixel_values"].shape[0]
+
+    def test_image_processor_defaults(self):
+        # AyaVisionProcessor has a default value `crop_to_patches=True` but the image processor's
+        # default is different. Override and pass the arg explicitly
+
+        image_processor = self.get_component("image_processor")
+
+        # Get all required components for processor
+        components = {}
+        for attribute in self.processor_class.get_attributes():
+            components[attribute] = self.get_component(attribute)
+
+        processor = self.processor_class(**components)
+        image_input = self.prepare_image_inputs()
+
+        input_image_proc = image_processor(image_input, crop_to_patches=False, return_tensors="pt")
+        input_processor = processor(images=image_input, crop_to_patches=False, return_tensors="pt")
+
+        # Verify outputs match
+        for key in input_image_proc:
+            if key in processor.model_input_names:
+                torch.testing.assert_close(input_image_proc[key], input_processor[key])

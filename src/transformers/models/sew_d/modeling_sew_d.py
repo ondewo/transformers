@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2021 ASAPP Inc. and the HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,21 +14,19 @@
 """PyTorch SEW model."""
 
 import math
-import warnings
 from collections.abc import Sequence
-from typing import Optional, Union
 
 import numpy as np
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss, LayerNorm
 
+from ... import initialization as init
 from ...activations import ACT2FN
 from ...integrations.deepspeed import is_deepspeed_zero3_enabled
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutput, CausalLMOutput, SequenceClassifierOutput
-from ...modeling_utils import PreTrainedModel
-from ...pytorch_utils import softmax_backward_data
+from ...modeling_utils import PreTrainedModel, get_torch_context_manager_or_global_device
 from ...utils import auto_docstring, logging
 from .configuration_sew_d import SEWDConfig
 
@@ -44,7 +41,7 @@ def _compute_mask_indices(
     shape: tuple[int, int],
     mask_prob: float,
     mask_length: int,
-    attention_mask: Optional[torch.LongTensor] = None,
+    attention_mask: torch.LongTensor | None = None,
     min_masks: int = 0,
 ) -> np.ndarray:
     """
@@ -205,19 +202,16 @@ def build_relative_position(query_size, key_size, bucket_size=-1, max_position=-
 
 
 @torch.jit.script
-# Copied from transformers.models.deberta.modeling_deberta.c2p_dynamic_expand
 def c2p_dynamic_expand(c2p_pos, query_layer, relative_pos):
     return c2p_pos.expand([query_layer.size(0), query_layer.size(1), query_layer.size(2), relative_pos.size(-1)])
 
 
 @torch.jit.script
-# Copied from transformers.models.deberta.modeling_deberta.p2c_dynamic_expand
 def p2c_dynamic_expand(c2p_pos, query_layer, key_layer):
     return c2p_pos.expand([query_layer.size(0), query_layer.size(1), key_layer.size(-2), key_layer.size(-2)])
 
 
 @torch.jit.script
-# Copied from transformers.models.deberta.modeling_deberta.pos_dynamic_expand
 def pos_dynamic_expand(pos_index, p2c_att, key_layer):
     return pos_index.expand(p2c_att.size()[:2] + (pos_index.size(-2), key_layer.size(-2)))
 
@@ -434,17 +428,6 @@ class SEWDFeatureEncoder(nn.Module):
         return hidden_states
 
 
-class SEWDFeatureExtractor(SEWDFeatureEncoder):
-    def __init__(self, config):
-        super().__init__(config)
-        warnings.warn(
-            f"The class `{self.__class__.__name__}` has been depreciated "
-            "and will be removed in Transformers v5. "
-            f"Use `{self.__class__.__bases__[0].__name__}` instead.",
-            FutureWarning,
-        )
-
-
 class ContextPooler(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -509,7 +492,7 @@ class XSoftmax(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         (output,) = ctx.saved_tensors
-        inputGrad = softmax_backward_data(ctx, grad_output, output)
+        inputGrad = torch._softmax_backward_data(grad_output, output, ctx.dim, output.dtype)
         return inputGrad, None, None
 
     @staticmethod
@@ -560,7 +543,7 @@ class XDropout(torch.autograd.Function):
             return grad_output, None
 
     @staticmethod
-    def symbolic(g: torch._C.Graph, input: torch._C.Value, local_ctx: Union[float, DropoutContext]) -> torch._C.Value:
+    def symbolic(g: torch._C.Graph, input: torch._C.Value, local_ctx: float | DropoutContext) -> torch._C.Value:
         from torch.onnx import symbolic_opset12
 
         dropout_p = local_ctx
@@ -1031,8 +1014,10 @@ class SEWDTransformerEncoder(nn.Module):
 
     def get_attention_mask(self, attention_mask):
         if attention_mask.dim() <= 2:
-            extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            attention_mask = extended_attention_mask * extended_attention_mask.squeeze(-2).unsqueeze(-1)
+            # Shape: {batch, 1, 1, seq} — broadcasts with attention scores {batch, heads, seq, seq}.
+            # Avoids building a full {batch, 1, seq, seq} outer product whose seq dimension gets baked
+            # as a constant during ONNX export and breaks inference with different sequence lengths.
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
         elif attention_mask.dim() == 3:
             attention_mask = attention_mask.unsqueeze(1)
 
@@ -1128,7 +1113,7 @@ class SEWDEncoder(nn.Module):
     def forward(
         self,
         hidden_states: torch.tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
@@ -1143,23 +1128,27 @@ class SEWDEncoder(nn.Module):
             expand_attention_mask = attention_mask.unsqueeze(-1).repeat(1, 1, hidden_states.shape[2])
             hidden_states[~expand_attention_mask.bool()] = 0.0
 
-            input_lengths = (attention_mask.long()).sum(-1)
-            # apply pooling formula to get real output_lengths
-            output_lengths = input_lengths // self.config.squeeze_factor
-            attention_ids = (
-                torch.arange(0, max_encoder_length, device=output_lengths.device)
-                .view(1, -1)
-                .expand(output_lengths.shape[0], -1)
+            # Pool the attention mask to match the pooled hidden_states shape.
+            # max_pool1d avoids torch.arange(max_encoder_length) which bakes
+            # the sequence length as a constant during ONNX export.
+            attention_mask = (
+                nn.functional.max_pool1d(
+                    attention_mask.float().unsqueeze(1),
+                    kernel_size=self.config.squeeze_factor,
+                    stride=self.config.squeeze_factor,
+                )
+                .squeeze(1)
+                .long()
             )
-            attention_mask = (attention_ids < output_lengths.view(-1, 1)).long()
 
         n_input_timesteps = hidden_states.shape[1]
 
         hidden_states = hidden_states.transpose(1, 2)
         position_embeddings = self.pos_conv_embed(hidden_states)
         pooled_hidden_states = self.pool(hidden_states)
-        min_length = min(position_embeddings.size(-1), pooled_hidden_states.size(-1))
-        hidden_states = pooled_hidden_states[..., :min_length] + position_embeddings[..., :min_length]
+        # pos_conv_embed (stride=squeeze_factor, ceil padding) always produces >= pooled length;
+        # trim to the pooled length to align shapes without a data-dependent min() guard.
+        hidden_states = pooled_hidden_states + position_embeddings[..., : pooled_hidden_states.size(-1)]
         hidden_states = hidden_states.transpose(1, 2)
 
         encoder_outputs = self.encoder(hidden_states, attention_mask, output_hidden_states, output_attentions)
@@ -1184,45 +1173,34 @@ class SEWDPreTrainedModel(PreTrainedModel):
     config: SEWDConfig
     base_model_prefix = "sew-d"
     main_input_name = "input_values"
+    input_modalities = "audio"
     supports_gradient_checkpointing = True
 
+    @torch.no_grad()
     def _init_weights(self, module):
         """Initialize the weights"""
+        super()._init_weights(module)
         if isinstance(module, SEWDPositionalConvEmbedding):
-            nn.init.normal_(
+            init.normal_(
                 module.conv.weight,
                 mean=0,
                 std=2 * math.sqrt(1 / (module.conv.kernel_size[0] * module.conv.in_channels)),
             )
-            nn.init.constant_(module.conv.bias, 0)
-        elif isinstance(module, nn.Linear):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-        elif isinstance(module, (nn.LayerNorm, nn.GroupNorm)):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
+            init.constant_(module.conv.bias, 0)
         elif isinstance(module, nn.Conv1d):
             if is_deepspeed_zero3_enabled():
                 import deepspeed
 
                 if hasattr(module, "weight_v") and hasattr(module, "weight_g"):
                     with deepspeed.zero.GatheredParameters([module.weight_v, module.weight_g], modifier_rank=0):
-                        nn.init.kaiming_normal_(module.weight.data)
+                        init.kaiming_normal_(module.weight)
                 else:
                     with deepspeed.zero.GatheredParameters(module.weight, modifier_rank=0):
-                        nn.init.kaiming_normal_(module.weight.data)
+                        init.kaiming_normal_(module.weight)
             else:
-                nn.init.kaiming_normal_(module.weight.data)
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+                init.kaiming_normal_(module.weight)
 
-        if isinstance(module, (nn.Linear, nn.Conv1d)) and module.bias is not None:
-            module.bias.data.zero_()
-
-    def _get_feat_extract_output_lengths(self, input_lengths: Union[torch.LongTensor, int]):
+    def _get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor | int):
         """
         Computes the output length of the convolutional layers
         """
@@ -1239,15 +1217,11 @@ class SEWDPreTrainedModel(PreTrainedModel):
 
     def _get_feature_vector_attention_mask(self, feature_vector_length: int, attention_mask: torch.LongTensor):
         output_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1)).to(torch.long)
-        batch_size = attention_mask.shape[0]
-
-        attention_mask = torch.zeros(
-            (batch_size, feature_vector_length), dtype=attention_mask.dtype, device=attention_mask.device
-        )
-        # these two operations makes sure that all values before the output lengths idxs are attended to
-        attention_mask[(torch.arange(attention_mask.shape[0], device=attention_mask.device), output_lengths - 1)] = 1
-        attention_mask = attention_mask.flip([-1]).cumsum(-1).flip([-1]).bool()
-        return attention_mask
+        # Build the feature mask via arange broadcast comparison.  This keeps feature_vector_length
+        # as a symbolic SymInt in torch.export / torch.onnx.export (ONNX Range op), avoiding the
+        # data-dependent scatter + cumsum pattern that bakes the length as a constant.
+        attention_ids = torch.arange(feature_vector_length, device=attention_mask.device)
+        return attention_ids.unsqueeze(0) < output_lengths.unsqueeze(1)
 
 
 @auto_docstring
@@ -1276,8 +1250,8 @@ class SEWDModel(SEWDPreTrainedModel):
     def _mask_hidden_states(
         self,
         hidden_states: torch.FloatTensor,
-        mask_time_indices: Optional[torch.FloatTensor] = None,
-        attention_mask: Optional[torch.LongTensor] = None,
+        mask_time_indices: torch.FloatTensor | None = None,
+        attention_mask: torch.LongTensor | None = None,
     ):
         """
         Masks extracted features along time axis and/or along feature axis according to
@@ -1322,13 +1296,14 @@ class SEWDModel(SEWDPreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_values: Optional[torch.Tensor],
-        attention_mask: Optional[torch.Tensor] = None,
-        mask_time_indices: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[tuple, BaseModelOutput]:
+        input_values: torch.Tensor | None,
+        attention_mask: torch.Tensor | None = None,
+        mask_time_indices: torch.FloatTensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        **kwargs,
+    ) -> tuple | BaseModelOutput:
         r"""
         mask_time_indices (`torch.BoolTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Indices to mask extracted features for contrastive loss. When in training mode, model learns to predict
@@ -1338,7 +1313,7 @@ class SEWDModel(SEWDPreTrainedModel):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         extract_features = self.feature_extractor(input_values)
         extract_features = extract_features.transpose(1, 2)
@@ -1381,7 +1356,7 @@ class SEWDModel(SEWDPreTrainedModel):
 )
 # Copied from transformers.models.wav2vec2.modeling_wav2vec2.Wav2Vec2ForCTC with Wav2Vec2->SEWD, wav2vec2->sew_d, WAV2VEC2->SEWD
 class SEWDForCTC(SEWDPreTrainedModel):
-    def __init__(self, config, target_lang: Optional[str] = None):
+    def __init__(self, config, target_lang: str | None = None):
         r"""
         target_lang (`str`, *optional*):
             Language id of adapter weights. Adapter weights are stored in the format adapter.<lang>.safetensors or
@@ -1410,13 +1385,16 @@ class SEWDForCTC(SEWDPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def tie_weights(self):
+    def tie_weights(self, **kwargs):
         """
         This method overwrites [`~PreTrainedModel.tie_weights`] so that adapter weights can be correctly loaded when
         passing `target_lang=...` to `from_pretrained(...)`.
 
         This method is **not** supposed to be called by the user and is prone to be changed in the future.
         """
+
+        if get_torch_context_manager_or_global_device() == torch.device("meta"):
+            return
 
         # Note that `tie_weights` is usually used to tie input and output embedding weights. The method is re-purposed to
         # correctly load adapter layers for SEWD so that we do not have to introduce a new API to
@@ -1430,18 +1408,6 @@ class SEWDForCTC(SEWDPreTrainedModel):
             logger.info("By default `target_lang` is set to 'eng'.")
         elif target_lang is not None:
             self.load_adapter(target_lang, force_load=True)
-
-    def freeze_feature_extractor(self):
-        """
-        Calling this function will disable the gradient computation for the feature encoder so that its parameter will
-        not be updated during training.
-        """
-        warnings.warn(
-            "The method `freeze_feature_extractor` is deprecated and will be removed in Transformers v5. "
-            "Please use the equivalent `freeze_feature_encoder` method instead.",
-            FutureWarning,
-        )
-        self.freeze_feature_encoder()
 
     def freeze_feature_encoder(self):
         """
@@ -1461,13 +1427,14 @@ class SEWDForCTC(SEWDPreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_values: Optional[torch.Tensor],
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        labels: Optional[torch.Tensor] = None,
-    ) -> Union[tuple, CausalLMOutput]:
+        input_values: torch.Tensor | None,
+        attention_mask: torch.Tensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        labels: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple | CausalLMOutput:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, target_length)`, *optional*):
             Labels for connectionist temporal classification. Note that `target_length` has to be smaller or equal to
@@ -1475,7 +1442,7 @@ class SEWDForCTC(SEWDPreTrainedModel):
             All labels set to `-100` are ignored (masked), the loss is only computed for labels in `[0, ...,
             config.vocab_size - 1]`.
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if labels is not None and labels.max() >= self.config.vocab_size:
             raise ValueError(f"Label values must be <= vocab_size: {self.config.vocab_size}")
@@ -1555,18 +1522,6 @@ class SEWDForSequenceClassification(SEWDPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def freeze_feature_extractor(self):
-        """
-        Calling this function will disable the gradient computation for the feature encoder so that its parameters will
-        not be updated during training.
-        """
-        warnings.warn(
-            "The method `freeze_feature_extractor` is deprecated and will be removed in Transformers v5. "
-            "Please use the equivalent `freeze_feature_encoder` method instead.",
-            FutureWarning,
-        )
-        self.freeze_feature_encoder()
-
     def freeze_feature_encoder(self):
         """
         Calling this function will disable the gradient computation for the feature encoder so that its parameter will
@@ -1585,13 +1540,14 @@ class SEWDForSequenceClassification(SEWDPreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_values: Optional[torch.Tensor],
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        labels: Optional[torch.Tensor] = None,
-    ) -> Union[tuple, SequenceClassifierOutput]:
+        input_values: torch.Tensor | None,
+        attention_mask: torch.Tensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        labels: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple | SequenceClassifierOutput:
         r"""
         input_values (`torch.FloatTensor` of shape `(batch_size, sequence_length)`):
             Float values of input raw speech waveform. Values can be obtained by loading a `.flac` or `.wav` audio file
@@ -1605,7 +1561,7 @@ class SEWDForSequenceClassification(SEWDPreTrainedModel):
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
         output_hidden_states = True if self.config.use_weighted_layer_sum else output_hidden_states
 
         outputs = self.sew_d(

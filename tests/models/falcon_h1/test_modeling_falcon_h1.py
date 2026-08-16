@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,16 +13,17 @@
 # limitations under the License.
 """Testing suite for the PyTorch FalconH1 model."""
 
+import textwrap
 import unittest
 
 import pytest
 
-from transformers import FalconH1Config, is_torch_available
+from transformers import DynamicCache, FalconH1Config, is_torch_available
 from transformers.testing_utils import (
     Expectations,
-    get_device_properties,
+    require_kernels,
     require_torch,
-    require_torch_gpu,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
@@ -38,9 +38,6 @@ if is_torch_available():
     import torch
 
     from transformers import AutoTokenizer, FalconH1ForCausalLM, FalconH1Model
-    from transformers.models.falcon_h1.modeling_falcon_h1 import (
-        FalconHybridMambaAttentionDynamicCache,
-    )
 
 
 class FalconH1ModelTester:
@@ -207,17 +204,9 @@ class FalconH1ModelTester:
         model.eval()
 
         # first forward pass
-        # Attention: Jamba needs the cache to be initialized to return a cache!
-        past_key_values = FalconHybridMambaAttentionDynamicCache(
-            config,
-            input_ids.shape[0],
-            model.dtype,
-            devices=[model.device for _ in range(model.config.num_hidden_layers)],
-        )
         outputs = model(
             input_ids,
             attention_mask=input_mask,
-            past_key_values=past_key_values,
             use_cache=True,
         )
         past_key_values = outputs.past_key_values
@@ -240,9 +229,6 @@ class FalconH1ModelTester:
             attention_mask=next_attention_mask,
             past_key_values=past_key_values,
             output_hidden_states=True,
-            cache_position=torch.arange(
-                input_ids.shape[1], input_ids.shape[1] + next_tokens.shape[1], device=model.device
-            ),
         )["hidden_states"][0]
 
         # select random slice
@@ -255,13 +241,45 @@ class FalconH1ModelTester:
         # test that outputs are equal for slice
         self.parent.assertTrue(torch.allclose(output_from_past_slice, output_from_no_past_slice, atol=1e-3))
 
+    def create_and_check_mamba_chunked_prefill(self, config, input_ids, *args, device="cpu"):
+        """
+        Adapted from `test_linear_attention_multi_token_cached_forward_matches_single_token`
+        to check whether multi-token cached input is properly handled.
+
+        Can either be run on GPU (fast path) or CPU (slow path), see `test_mamba_chunked_prefill_*`
+        """
+        model = FalconH1Model(config=config)
+        model.to(device)
+        model.eval()
+
+        input_ids = input_ids[:1].to(device)
+        prefill_len = input_ids.shape[1] // 2 + 1
+        prompt = input_ids[:, :prefill_len]
+        next_token = input_ids[:, prefill_len : prefill_len + 1]
+        distractors = input_ids[:, prefill_len + 1 :]
+        multi_input = torch.cat([next_token, distractors], dim=1)
+
+        cache_single = DynamicCache(config=config)
+        with torch.no_grad():
+            model(input_ids=prompt, past_key_values=cache_single, use_cache=True)
+            single_out = model(input_ids=next_token, past_key_values=cache_single, use_cache=True)
+        ref_first = single_out.last_hidden_state[:, 0, :]
+
+        cache_multi = DynamicCache(config=config)
+        with torch.no_grad():
+            model(input_ids=prompt, past_key_values=cache_multi, use_cache=True)
+            multi_out = model(input_ids=multi_input, past_key_values=cache_multi, use_cache=True)
+        under_test_first = multi_out.last_hidden_state[:, 0, :]
+
+        self.parent.assertTrue(
+            torch.allclose(ref_first, under_test_first, atol=1e-4, rtol=1e-4),
+            msg=f"Max diff: {(ref_first - under_test_first).abs().max().item():.6f}",
+        )
+
 
 @require_torch
 class FalconH1ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
     all_model_classes = (FalconH1Model, FalconH1ForCausalLM) if is_torch_available() else ()
-    test_headmasking = False
-    test_pruning = False
-    fx_compatible = False
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer
@@ -271,25 +289,19 @@ class FalconH1ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterM
         {"feature-extraction": FalconH1Model, "text-generation": FalconH1ForCausalLM} if is_torch_available() else {}
     )
 
-    def _check_past_key_values_for_generate(self, batch_size, decoder_past_key_values, cache_length, config):
-        self.assertIsInstance(decoder_past_key_values, FalconHybridMambaAttentionDynamicCache)
-
-        # (batch, head, seq_length, head_features)
-        expected_shape = (
+    def _get_conv_state_shape(self, batch_size: int, config):
+        intermediate_size = (
+            config.mamba_d_ssm if config.mamba_d_ssm is not None else int(config.mamba_expand * config.hidden_size)
+        )
+        conv_shape = (
             batch_size,
-            config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.num_attention_heads,
-            cache_length,
-            config.hidden_size // config.num_attention_heads,
+            intermediate_size + 2 * config.mamba_n_groups * config.mamba_d_state,
+            config.mamba_d_conv,
         )
+        return conv_shape
 
-        self.assertListEqual(
-            [key_tensor.shape for key_tensor in decoder_past_key_values.key_cache],
-            [expected_shape] * len(decoder_past_key_values.key_cache),
-        )
-        self.assertListEqual(
-            [value_cache.shape for value_cache in decoder_past_key_values.value_cache],
-            [expected_shape] * len(decoder_past_key_values.value_cache),
-        )
+    def _get_recurrent_state_shape(self, batch_size: int, config):
+        return (batch_size, config.mamba_n_heads, config.mamba_d_head, config.mamba_d_state)
 
     def setUp(self):
         self.model_tester = FalconH1ModelTester(self)
@@ -309,6 +321,16 @@ class FalconH1ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterM
     def test_decoder_model_past_with_large_inputs(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_decoder_model_past_large_inputs(*config_and_inputs)
+
+    def test_mamba2_chunked_prefill_cpu(self):
+        config_and_inputs = self.model_tester.prepare_config_and_inputs()
+        self.model_tester.create_and_check_mamba_chunked_prefill(*config_and_inputs, device="cpu")
+
+    @require_torch_accelerator
+    @require_kernels
+    def test_mamba2_chunked_prefill_torch_device(self):
+        config_and_inputs = self.model_tester.prepare_config_and_inputs()
+        self.model_tester.create_and_check_mamba_chunked_prefill(*config_and_inputs, device=torch_device)
 
     def test_attention_outputs(self):
         r"""
@@ -390,14 +412,59 @@ class FalconH1ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterM
 
 @slow
 @require_torch
-@require_torch_gpu
+@require_torch_accelerator
 class FalconH1ModelIntegrationTest(unittest.TestCase):
-    @slow
     def test_falcon_h1_hard(self):
         """
         An integration test for Falcon-H1.
         """
-        EXPECTED_TEXT_DEFAULT = """
+        EXPECTED_TEXT_A100 = textwrap.dedent(
+            """\
+            user
+            Tell me about the french revolution.
+            assistant
+            The French Revolution (1789–1799) was a period of radical social and political upheaval in France that fundamentally transformed the nation and had profound effects on the rest of Europe and the world. Here are the key aspects of the revolution:
+
+            ### **Causes**
+            1. **Economic Crisis**: France was in severe financial trouble due to costly wars (particularly the American Revolution), debt, and inefficient taxation. The nobility and clergy were exempt from taxes, while the common people bore the brunt of the burden.
+            2. **Social Inequality**: French society was divided into three estates: the First Estate (clergy), the Second Estate (nobility), and the Third Estate (commoners, including peasants, bourgeoisie, and urban workers). The disparity between the privileged classes and the common people was immense.
+            3. **Enlightenment Ideas**: Philosophers like Voltaire, Rousseau, and Montesquieu inspired ideas of liberty, equality, and popular sovereignty, which fueled revolutionary fervor.
+            4. **Political Instability**: The absolute monarchy under King Louis XVI proved unable to address the country’s problems, leading to widespread discontent.
+
+            ### **Key Events**
+            1. **Estates-General (1789)**: The Third Estate broke away from the privileged Estates to form the National Assembly, demanding a constitution and tax reform.
+            2. **Storming of the Bastille (July 14, 1789)**: A symbol of royal tyranny, the Bastille fortress was stormed by revolutionaries, sparking widespread rebellion.
+            3. **Declaration of the Rights of Man and of the Citizen (August 1789)**: This foundational document proclaimed liberty, equality, and fraternity.
+            4. **Reign of Terror (1793–1794)**: Led by Maximilien Robespierre and the Committee of Public Safety, the revolution turned violent as thousands were executed for alleged counter-revolutionary activities.
+            5. **Rise and Fall of Robespierre (July"""
+        )
+
+        EXPECTED_TEXT_A10 = textwrap.dedent(
+            """\
+            user
+            Tell me about the french revolution.
+            assistant
+            The French Revolution (1789–1799) was a period of radical social and political upheaval in France that fundamentally transformed the nation and had profound effects on the rest of Europe and the world. Here are the key aspects of the revolution:
+
+            ### **Causes**
+            1. **Economic Crisis**: France was in severe financial trouble due to costly wars (the American Revolution and the Seven Years' War), extravagant spending by the monarchy, and inefficient taxation.
+            2. **Social Inequality**: The rigid class system (the Ancien Régime) divided society into the privileged nobility and clergy (First Estate) and the commoners (Third Estate), who bore the brunt of taxation and had few rights.
+            3. **Enlightenment Ideas**: Philosophers like Rousseau, Voltaire, and Montesquieu inspired ideas of liberty, equality, and popular sovereignty.
+            4. **Settlement of 1789**: The Estates-General convened to address the financial crisis, leading to the Third Estate's assertion of its rights and the eventual abolition of the feudal system.
+
+            ### **Key Events**
+            1. **Opening of the Revolution (1789)**:
+               - **Storming of the Bastille**: Symbolic of the fall of royal authority, marking the start of the revolution.
+               - **Declaration of the Rights of Man and of the Citizen**: A foundational document proclaiming liberty, equality, and fraternity.
+
+            2. **Stages of the Revolution**:
+               - **Staffords' Reforms (1789–1791)**: Attempts to address grievances, including the abolition of feudal privileges and the introduction of the Civil Constitution of the Church.
+               - **Reign of Terror (1793–1794)**: Led by Maximilien Robespierre, characterized by mass executions of perceived enemies of the revolution, including King Louis XVI and Queen Marie Antoinette.
+               - **Thermidorian Reaction (1794–1795)**: The fall of"""
+        )
+
+        EXPECTED_TEXT_XPU = textwrap.dedent(
+            """\
             user
             Tell me about the french revolution.
             assistant
@@ -405,65 +472,41 @@ class FalconH1ModelIntegrationTest(unittest.TestCase):
 
             ### **Causes**
             1. **Economic Crisis**: France was in severe financial trouble due to costly wars (particularly the American Revolution), extravagant spending by the monarchy, and inefficient taxation.
-            2. **Social Inequality**: The rigid class system (the Ancien Régime) divided society into the privileged nobility and clergy (First Estate) and the commoners (Third Estate), who bore the brunt of taxation and had few rights.
-            3. **Enlightenment Ideas**: Philosophers like Voltaire, Rousseau, and Montesquieu inspired ideas of liberty, equality, and popular sovereignty.
-            4. **Settlement of 1789**: The Estates-General convened to address the financial crisis, leading to the Third Estate's assertion of its rights and the eventual abolition of the feudal system.
+            2. **Social Inequality**: The rigid class system (the Ancien Régime) favored the nobility and clergy while the majority of the population (the Third Estate) bore the brunt of taxation and had limited rights.
+            3. **Enlightenment Ideas**: Philosophers like Rousseau, Voltaire, and Montesquieu inspired ideas of liberty, equality, and popular sovereignty.
+            4. **Settlement of 1789**: The Estates-General convened to address the financial crisis, leading to debates that exposed the weaknesses of the monarchy and the grievances of the common people.
 
             ### **Key Events**
-            1. **Storming of the Bastille (July 14, 1789)**: A symbol of royal tyranny, the Bastille fortress was stormed by revolutionaries, sparking widespread rebellion.
-            2. **Declaration of the Rights of Man and of the Citizen (August 1789)**: A foundational document proclaiming liberty, equality, and fraternity.
-            3. **National Assembly and King’s Trial (1791–1792)**: King Louis XVI and his ministers were tried and executed (King Louis was guillotined, Marie Antoinette was banished), marking the end of the monarchy.
-            4. **Rise of the Jacobins and Reign of Terror (1793–1794)**: Radical leaders like Maximilien Robespierre sought to purge France of counter-revolutionaries, leading to mass executions and widespread fear.
-            5. **Thermidorian Reaction
-        """
+            1. **Opening of the Revolution (1789)**:
+               - **Storming of the Bastille**: A symbol of royal tyranny, marking the start of the revolution.
+               - **Declaration of the Rights of Man and of the Citizen**: A foundational document proclaiming liberty, equality, and fraternity.
 
-        EXPECTED_TEXT_A10 = """
-            user
-            Tell me about the french revolution.
-            assistant
-            The French Revolution (1789–1799) was a period of profound social upheaval and radical political change in France that fundamentally transformed the nation and had far-reaching effects on the rest of Europe and the world. Here are the key aspects of the revolution:
+            2. **Stages of the Revolution**:
+               - **Staffords' Reforms (1789–1791)**: Attempts to address grievances, including the abolition of feudal privileges and the introduction of the Civil Constitution of the Church.
+               - **Reign of Terror (1793–1794)**: Led by Maximilien Robespierre, characterized by mass executions of perceived enemies of the revolution, including King Louis XVI and Queen Marie Antoinette.
+               - **Thermidorian Reaction (1794)**: The fall of Robespierre and the end of the Reign of Terror.
 
-            ### **Causes**
-            1. **Economic Crisis**: France was in severe financial trouble due to costly wars (particularly the American Revolution), extravagant spending by the monarchy, and an inefficient tax system.
-            2. **Social Inequality**: The privileged classes (the nobility and clergy) enjoyed immense wealth and power, while the majority of the population (the Third Estate, comprising commoners) faced poverty and lack of representation.
-            3. **Enlightenment Ideas**: Philosophers like Voltaire, Rousseau, and Montesquieu inspired ideas of liberty, equality, and popular sovereignty, which fueled revolutionary fervor.
-            4. **Political Instability**: The absolute monarchy under King Louis XVI proved unable to address the nation's problems, leading to growing discontent.
-
-            ### **Key Events**
-            1. **Estates-General (1789)**: The Third Estate broke away and formed the National Assembly, forcing King Louis XVI to convene the Estates-General, an old legislative body, to address the financial crisis.
-            2. **Storming of the Bastille (July 14, 1789)**: A symbol of royal tyranny, the Bastille fortress was stormed by revolutionaries, sparking widespread rebellion.
-            3. **Declaration of the Rights of Man and of the Citizen (August 1789)**: This foundational document proclaimed liberty, equality, and fraternity as fundamental rights.
-            4. **Abolition of Feudalism (November 1789)**: The National Assembly abolished feudal privileges, redistributing church lands to the people.
-            5. **Tennis Court Oath (May 5, 1789)**: The National Assembly members, meeting on a tennis court, pledged to continue their work until a new constitution was established.
-            6.
-        """
+            3. **"""
+        )
 
         expected_texts = Expectations(
             {
-                (None, None): EXPECTED_TEXT_DEFAULT,
-                ("cuda", 8): EXPECTED_TEXT_A10,
+                ("cuda", (8, 0)): EXPECTED_TEXT_A100,
+                ("cuda", (8, 6)): EXPECTED_TEXT_A10,
+                ("xpu", None): EXPECTED_TEXT_XPU,
             }
         )
         EXPECTED_TEXT = expected_texts.get_expectation()
-        # Remove the first char (`\n`) and the consecutive whitespaces caused by the formatting.
-        EXPECTED_TEXT = EXPECTED_TEXT.strip().replace(" " * 12, "")
-
-        device_properties = get_device_properties()
-        # For A10, there is an ending " "
-        if device_properties[0] == "cuda" and device_properties[1] == 8:
-            EXPECTED_TEXT = EXPECTED_TEXT + " "
 
         model_id = "tiiuae/Falcon-H1-1.5B-Deep-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         model = FalconH1ForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16, device_map="auto")
-        device = "cuda"
         messages = [{"role": "user", "content": "Tell me about the french revolution."}]
         input_text = tokenizer.apply_chat_template(messages, tokenize=False)
-        inputs = tokenizer.encode(input_text, return_tensors="pt").to(device)
+        inputs = tokenizer.encode(input_text, return_tensors="pt").to(torch_device)
 
         with torch.no_grad():
             outputs = model.generate(inputs, max_new_tokens=512, do_sample=False)
 
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
         self.assertEqual(generated_text, EXPECTED_TEXT)

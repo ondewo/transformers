@@ -16,13 +16,13 @@
 import copy
 import inspect
 import os
-import tempfile
 import unittest
 
 import numpy as np
 from datasets import Audio, load_dataset
 from parameterized import parameterized
 
+from tests.utils.test_audio_utils import compute_rmse
 from transformers import AutoProcessor, EncodecConfig
 from transformers.testing_utils import (
     is_torch_available,
@@ -32,7 +32,7 @@ from transformers.testing_utils import (
 )
 
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, _config_zero_init, floats_tensor, ids_tensor
+from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -49,9 +49,6 @@ def prepare_inputs_dict(
     decoder_input_ids=None,
     attention_mask=None,
     decoder_attention_mask=None,
-    head_mask=None,
-    decoder_head_mask=None,
-    cross_attn_head_mask=None,
 ):
     if input_ids is not None:
         encoder_dict = {"input_ids": input_ids}
@@ -148,9 +145,9 @@ class EncodecModelTester:
 class EncodecModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     all_model_classes = (EncodecModel,) if is_torch_available() else ()
     is_encoder_decoder = True
-    test_pruning = False
-    test_headmasking = False
+
     test_resize_embeddings = False
+    test_torch_exportable = False  # data-dependent control flow in `_pad1d` (`if length <= max_pad`)
     pipeline_model_mapping = {"feature-extraction": EncodecModel} if is_torch_available() else {}
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
@@ -165,7 +162,7 @@ class EncodecModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
     def setUp(self):
         self.model_tester = EncodecModelTester(self)
         self.config_tester = ConfigTester(
-            self, config_class=EncodecConfig, hidden_size=37, common_properties=[], has_text_modality=False
+            self, config_class=EncodecConfig, hidden_size=32, common_properties=[], has_text_modality=False
         )
 
     def test_config(self):
@@ -204,108 +201,6 @@ class EncodecModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
     @unittest.skip(
         reason="The EncodecModel is not transformers based, thus it does not have the usual `attention` logic"
     )
-    def test_torchscript_output_attentions(self):
-        pass
-
-    @unittest.skip(
-        reason="The EncodecModel is not transformers based, thus it does not have the usual `hidden_states` logic"
-    )
-    def test_torchscript_output_hidden_state(self):
-        pass
-
-    def _create_and_check_torchscript(self, config, inputs_dict):
-        if not self.test_torchscript:
-            self.skipTest(reason="test_torchscript is set to False")
-
-        configs_no_init = _config_zero_init(config)  # To be sure we have no Nan
-        configs_no_init.torchscript = True
-        configs_no_init.return_dict = False
-        for model_class in self.all_model_classes:
-            model = model_class(config=configs_no_init)
-            model.to(torch_device)
-            model.eval()
-            inputs = self._prepare_for_class(inputs_dict, model_class)
-
-            main_input_name = model_class.main_input_name
-
-            try:
-                main_input = inputs[main_input_name]
-                model(main_input)
-                traced_model = torch.jit.trace(model, main_input)
-            except RuntimeError:
-                self.fail("Couldn't trace module.")
-
-            with tempfile.TemporaryDirectory() as tmp_dir_name:
-                pt_file_name = os.path.join(tmp_dir_name, "traced_model.pt")
-
-                try:
-                    torch.jit.save(traced_model, pt_file_name)
-                except Exception:
-                    self.fail("Couldn't save module.")
-
-                try:
-                    loaded_model = torch.jit.load(pt_file_name)
-                except Exception:
-                    self.fail("Couldn't load module.")
-
-            model.to(torch_device)
-            model.eval()
-
-            loaded_model.to(torch_device)
-            loaded_model.eval()
-
-            model_state_dict = model.state_dict()
-            loaded_model_state_dict = loaded_model.state_dict()
-
-            non_persistent_buffers = {}
-            for key in loaded_model_state_dict:
-                if key not in model_state_dict:
-                    non_persistent_buffers[key] = loaded_model_state_dict[key]
-
-            loaded_model_state_dict = {
-                key: value for key, value in loaded_model_state_dict.items() if key not in non_persistent_buffers
-            }
-
-            self.assertEqual(set(model_state_dict.keys()), set(loaded_model_state_dict.keys()))
-
-            model_buffers = list(model.buffers())
-            for non_persistent_buffer in non_persistent_buffers.values():
-                found_buffer = False
-                for i, model_buffer in enumerate(model_buffers):
-                    if torch.equal(non_persistent_buffer, model_buffer):
-                        found_buffer = True
-                        break
-
-                self.assertTrue(found_buffer)
-                model_buffers.pop(i)
-
-            model_buffers = list(model.buffers())
-            for non_persistent_buffer in non_persistent_buffers.values():
-                found_buffer = False
-                for i, model_buffer in enumerate(model_buffers):
-                    if torch.equal(non_persistent_buffer, model_buffer):
-                        found_buffer = True
-                        break
-
-                self.assertTrue(found_buffer)
-                model_buffers.pop(i)
-
-            models_equal = True
-            for layer_name, p1 in model_state_dict.items():
-                if layer_name in loaded_model_state_dict:
-                    p2 = loaded_model_state_dict[layer_name]
-                    if p1.data.ne(p2.data).sum() > 0:
-                        models_equal = False
-
-            self.assertTrue(models_equal)
-
-            # Avoid memory leak. Without this, each call increase RAM usage by ~20MB.
-            # (Even with this call, there are still memory leak by ~0.04MB)
-            self.clear_torch_jit_class_registry()
-
-    @unittest.skip(
-        reason="The EncodecModel is not transformers based, thus it does not have the usual `attention` logic"
-    )
     def test_attention_outputs(self):
         pass
 
@@ -329,7 +224,7 @@ class EncodecModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
 
             torch.manual_seed(0)
             config.chunk_length_s = 2
-            config.overlap = 0
+            config.overlap = 0.0
             config.sampling_rate = 20
 
             model = model_class(config)
@@ -422,23 +317,6 @@ class EncodecModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
     def test_model_forward_with_normalization(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_normalization()
         self.model_tester.create_and_check_model_forward(config, inputs_dict)
-
-
-def normalize(arr):
-    norm = np.linalg.norm(arr)
-    normalized_arr = arr / norm
-    return normalized_arr
-
-
-def compute_rmse(arr1, arr2):
-    arr1_np = arr1.cpu().numpy().squeeze()
-    arr2_np = arr2.cpu().numpy().squeeze()
-    max_length = min(arr1.shape[-1], arr2.shape[-1])
-    arr1_np = arr1_np[..., :max_length]
-    arr2_np = arr2_np[..., :max_length]
-    arr1_normalized = normalize(arr1_np)
-    arr2_normalized = normalize(arr2_np)
-    return np.sqrt(((arr1_normalized - arr2_normalized) ** 2).mean())
 
 
 """

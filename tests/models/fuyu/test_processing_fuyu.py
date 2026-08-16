@@ -1,10 +1,22 @@
-import tempfile
+# Copyright 2023 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import unittest
-from shutil import rmtree
+
+import numpy as np
 
 from transformers import (
-    AutoProcessor,
-    AutoTokenizer,
     FuyuImageProcessor,
     FuyuProcessor,
     is_torch_available,
@@ -25,41 +37,27 @@ if is_torch_available():
 @require_vision
 class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
     processor_class = FuyuProcessor
+    model_id = "adept/fuyu-8b"
+    # Fuyu uses a tokenizer with a very large vocabulary (~262K tokens), making tests slow and
+    # memory-intensive. tiny_model_id points to a trimmed tokenizer repo to keep tests lightweight.
+    tiny_model_id = "hf-internal-testing/tiny-processor-fuyu"
 
     @classmethod
-    def setUpClass(cls):
-        cls.tmpdirname = tempfile.mkdtemp()
-
-        image_processor = FuyuImageProcessor()
-        tokenizer = AutoTokenizer.from_pretrained("adept/fuyu-8b")
-
-        processor = FuyuProcessor(image_processor=image_processor, tokenizer=tokenizer)
-        processor.save_pretrained(cls.tmpdirname)
-
+    def _setup_test_attributes(cls, processor):
         cls.text_prompt = "Generate a coco-style caption.\\n"
         bus_image_url = url_to_local_path(
             "https://huggingface.co/datasets/hf-internal-testing/fixtures-captioning/resolve/main/bus.png"
         )
         cls.bus_image_pil = load_image(bus_image_url)
 
-    @classmethod
-    def tearDownClass(cls):
-        rmtree(cls.tmpdirname)
+    @unittest.skip("FuyuProcessor doesn't return typical pixel values for images")
+    def test_image_processor_defaults(self):
+        pass
 
-    def get_processor(self):
-        image_processor = FuyuImageProcessor()
-        tokenizer = AutoTokenizer.from_pretrained("adept/fuyu-8b")
-        processor = FuyuProcessor(image_processor, tokenizer, **self.prepare_processor_dict())
+    @unittest.skip("FuyuProcessor doesn't return typical pixel values for images")
+    def test_processor_with_multiple_inputs(self):
+        pass
 
-        return processor
-
-    def get_tokenizer(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs).tokenizer
-
-    def get_image_processor(self, **kwargs):
-        return AutoProcessor.from_pretrained(self.tmpdirname, **kwargs).image_processor
-
-    # Copied from tests.models.llava.test_processing_llava.LlavaProcessorTest.test_get_num_vision_tokens
     def test_get_num_vision_tokens(self):
         "Tests general functionality of the helper used internally in vLLM"
 
@@ -80,7 +78,8 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
         EXPECTED_IMAGE_PATCH_INPUTS = torch.Tensor([[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, -1, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, -1, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, -1, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, -1, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, -1, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, -1, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, -1, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, -1, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, -1, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, -1, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, -1, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, -1, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, -1, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,]]).to(torch.int64)
         EXPECTED_PADDED_UNPACKED_TOKEN_INPUTS = torch.Tensor([[71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71011, 71019, 1, 128340, 71374, 71389, 120412, 71377, 71835, 71374, 73615, 71375, 71399, 71435, 71122,]]).to(torch.int64)
 
-        one_image_bus_model_inputs = self.get_processor()(text=self.text_prompt, images=self.bus_image_pil)
+        processor = self.get_processor(use_tiny_ckpt=False)
+        one_image_bus_model_inputs = processor(text=self.text_prompt, images=self.bus_image_pil)
 
         # fmt: on
         torch.testing.assert_close(one_image_bus_model_inputs["image_patches_indices"], EXPECTED_IMAGE_PATCH_INPUTS)
@@ -91,7 +90,7 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
         Test to check processor works with just text input
         """
         processor_outputs = self.get_processor()(text=self.text_prompt)
-        tokenizer_outputs = self.get_tokenizer()(self.text_prompt)
+        tokenizer_outputs = self.get_component("tokenizer")(self.text_prompt)
         self.assertEqual(processor_outputs["input_ids"], tokenizer_outputs["input_ids"])
 
     def test_fuyu_processing_no_text(self):
@@ -142,9 +141,13 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
         SINGLE_RESIZED_PADDED_UNPACKED_TOKEN_INPUTS = torch.Tensor([[ 71011,  71011,  71011,  71019,  71011,  71011,  71011,  71019,  71011, 71011,  71011,  71019,  71011,  71011,  71011,  71019,  71011,  71011, 71011,  71019,  71011,  71011,  71011,  71019,  71011,  71011,  71011, 71019,  71011,  71011,  71011,  71019,  71011,  71011,  71011,  71019, 71011,  71011,  71011,  71019,      1, 128340,  71374,  71389, 120412, 71377,  71835,  71374,  73615,  71375,  71399,  71435,  71122]])
         # fmt: on
 
+        # Load once and reuse across all assertions in this test to avoid repeatedly loading the
+        # full processor (which carries the large 262K-vocab tokenizer).
+        processor = self.get_processor(use_tiny_ckpt=False)
+
         # Batch of two images - equally sized
         images = [self.bus_image_pil, self.bus_image_pil]
-        processor_outputs = self.get_processor()(text=[self.text_prompt, self.text_prompt], images=images)
+        processor_outputs = processor(text=[self.text_prompt, self.text_prompt], images=images)
 
         self.assertTrue(
             (
@@ -161,18 +164,18 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
 
         # Processes single images with different sizes as expected
         images = [self.bus_image_pil]
-        processor_outputs = self.get_processor()(text=self.text_prompt, images=images)
+        processor_outputs = processor(text=self.text_prompt, images=images)
         self.assertTrue((processor_outputs["image_patches_indices"] == SINGLE_IMAGE_PATCH_INPUTS).all())
         self.assertTrue((processor_outputs["input_ids"] == SINGLE_PADDED_UNPACKED_TOKEN_INPUTS).all())
 
         images = [self.bus_image_pil.resize((64, 300))]
-        processor_outputs = self.get_processor()(text=self.text_prompt, images=images)
+        processor_outputs = processor(text=self.text_prompt, images=images)
         self.assertTrue((processor_outputs["image_patches_indices"] == SINGLE_RESIZED_IMAGE_PATCH_INPUTS).all())
         self.assertTrue((processor_outputs["input_ids"] == SINGLE_RESIZED_PADDED_UNPACKED_TOKEN_INPUTS).all())
 
         # Batch of two images - different sizes. Left-pads the smaller image inputs
         images = [self.bus_image_pil, self.bus_image_pil.resize((64, 300))]
-        processor_outputs = self.get_processor()(text=[self.text_prompt, self.text_prompt], images=images)
+        processor_outputs = processor(text=[self.text_prompt, self.text_prompt], images=images)
 
         padding_len_patch = SINGLE_IMAGE_PATCH_INPUTS.shape[1] - SINGLE_RESIZED_IMAGE_PATCH_INPUTS.shape[1]
         padded_single_resized_image_patch = torch.cat(
@@ -197,7 +200,7 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
     @require_vision
     @require_torch
     def test_kwargs_overrides_default_tokenizer_kwargs(self):
-        if "image_processor" not in self.processor_class.attributes:
+        if "image_processor" not in self.processor_class.get_attributes():
             self.skipTest(f"image_processor attribute not present in {self.processor_class}")
         image_processor = self.get_component("image_processor")
         tokenizer = self.get_component("tokenizer", max_length=117)
@@ -225,7 +228,7 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
     @require_vision
     @require_torch
     def test_tokenizer_defaults_preserved_by_kwargs(self):
-        if "image_processor" not in self.processor_class.attributes:
+        if "image_processor" not in self.processor_class.get_attributes():
             self.skipTest(f"image_processor attribute not present in {self.processor_class}")
         image_processor = self.get_component("image_processor")
         tokenizer = self.get_component("tokenizer", max_length=117, padding="max_length")
@@ -243,7 +246,7 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
     @require_torch
     @require_vision
     def test_structured_kwargs_nested(self):
-        if "image_processor" not in self.processor_class.attributes:
+        if "image_processor" not in self.processor_class.get_attributes():
             self.skipTest(f"image_processor attribute not present in {self.processor_class}")
         image_processor = self.get_component("image_processor")
         tokenizer = self.get_component("tokenizer")
@@ -270,7 +273,7 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
     @require_torch
     @require_vision
     def test_structured_kwargs_nested_from_dict(self):
-        if "image_processor" not in self.processor_class.attributes:
+        if "image_processor" not in self.processor_class.get_attributes():
             self.skipTest(f"image_processor attribute not present in {self.processor_class}")
 
         image_processor = self.get_component("image_processor")
@@ -296,7 +299,7 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
     @require_torch
     @require_vision
     def test_unstructured_kwargs(self):
-        if "image_processor" not in self.processor_class.attributes:
+        if "image_processor" not in self.processor_class.get_attributes():
             self.skipTest(f"image_processor attribute not present in {self.processor_class}")
         image_processor = self.get_component("image_processor")
         tokenizer = self.get_component("tokenizer")
@@ -321,11 +324,10 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
     @require_torch
     @require_vision
     def test_unstructured_kwargs_batched(self):
-        if "image_processor" not in self.processor_class.attributes:
+        if "image_processor" not in self.processor_class.get_attributes():
             self.skipTest(f"image_processor attribute not present in {self.processor_class}")
-        image_processor = self.get_component("image_processor")
-        tokenizer = self.get_component("tokenizer")
-
+        image_processor = self.get_component("image_processor", use_tiny_ckpt=False)
+        tokenizer = self.get_component("tokenizer", use_tiny_ckpt=False)
         processor = self.processor_class(tokenizer=tokenizer, image_processor=image_processor)
         self.skip_processor_without_typed_kwargs(processor)
 
@@ -363,6 +365,30 @@ class FuyuProcessingTest(ProcessorTesterMixin, unittest.TestCase):
         inputs_dict_no_vision = {"text": text, "images": image_inputs_nested}
         inputs_nested = processor(**inputs_dict_no_vision, **processing_kwargs)
         self.assertTrue(self.text_input_name in inputs_nested)
+
+    def test_get_num_multimodal_tokens_matches_processor_call(self):
+        "Tests that the helper used internally in vLLM works correctly"
+
+        # Override -> model siltently ignores multiimage and processes one image per sample
+        processor = self.get_processor()
+
+        if processor.tokenizer.pad_token_id is None:
+            processor.tokenizer.pad_token_id = processor.tokenizer.eos_token_id
+
+        image_sizes = [(100, 100), (300, 100), (500, 30), (213, 167)]
+        image_inputs = []
+        for h, w in image_sizes:
+            image_inputs.append(np.random.randint(255, size=(h, w, 3), dtype=np.uint8))
+
+        image_token = getattr(self, "image_token", "")
+        text = [f"This is an image {image_token}"] * len(image_inputs)
+        inputs = processor(
+            text=text, images=image_inputs, padding=True, return_mm_token_type_ids=True, return_tensors="pt"
+        )
+
+        num_image_tokens_from_call = inputs.mm_token_type_ids.sum(-1).tolist()
+        num_image_tokens_from_helper = processor._get_num_multimodal_tokens(image_sizes=image_sizes)
+        self.assertListEqual(num_image_tokens_from_call, num_image_tokens_from_helper["num_image_tokens"])
 
 
 @require_torch

@@ -20,6 +20,7 @@ from ...utils.import_utils import define_import_structure
 if TYPE_CHECKING:
     from .configuration_lightglue import *
     from .image_processing_lightglue import *
+    from .image_processing_pil_lightglue import *
     from .modeling_lightglue import *
 else:
     import sys

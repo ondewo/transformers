@@ -9,7 +9,7 @@ Unless required by applicable law or agreed to in writing, software distributed 
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
+⚠️ Note that this file is in Markdown but contains specific syntax for our doc-builder (similar to MDX) that may not be
 rendered properly in your Markdown viewer.
 
 -->
@@ -139,7 +139,7 @@ With the dataset ready, you can now set up the model for fine-tuning.
 
 ## Load a base model
 
-Load the ["microsoft/git-base"](https://huggingface.co/microsoft/git-base) into a [`AutoModelForCausalLM`](https://huggingface.co/docs/transformers/model_doc/auto#transformers.AutoModelForCausalLM) object.
+Load the ["microsoft/git-base"](https://huggingface.co/microsoft/git-base) into a [`AutoModelForCausalLM`] object.
 
 ```python
 from transformers import AutoModelForCausalLM
@@ -169,7 +169,7 @@ def compute_metrics(eval_pred):
     return {"wer_score": wer_score}
 ```
 
-## Train!
+## Train
 
 Now, you are ready to start fine-tuning the model. You will use the 🤗 [`Trainer`] for this.
 
@@ -247,9 +247,9 @@ image
 Prepare image for the model.
 
 ```python
-from transformers import infer_device
+from accelerate import Accelerator
 
-device = infer_device()
+device = Accelerator().device
 inputs = processor(images=image, return_tensors="pt").to(device)
 pixel_values = inputs.pixel_values
 ```

@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import subprocess
-from typing import Any, Union
+from typing import Any
 
+import httpx
 import numpy as np
-import requests
 
 from ..utils import add_end_docstrings, is_torch_available, is_torchaudio_available, is_torchcodec_available, logging
 from .base import Pipeline, build_pipeline_init_args
@@ -65,6 +65,7 @@ def ffmpeg_read(bpayload: bytes, sampling_rate: int) -> np.ndarray:
 
 @add_end_docstrings(build_pipeline_init_args(has_feature_extractor=True))
 class AudioClassificationPipeline(Pipeline):
+    # no-format
     """
     Audio classification pipeline using any `AutoModelForAudioClassification`. This pipeline predicts the class of a
     raw waveform or an audio file. In case of an audio file, ffmpeg should be installed to support multiple audio
@@ -103,12 +104,9 @@ class AudioClassificationPipeline(Pipeline):
             kwargs["top_k"] = 5
         super().__init__(*args, **kwargs)
 
-        if self.framework != "pt":
-            raise ValueError(f"The {self.__class__} is only available in PyTorch.")
-
         self.check_model_type(MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING_NAMES)
 
-    def __call__(self, inputs: Union[np.ndarray, bytes, str, dict], **kwargs: Any) -> list[dict[str, Any]]:
+    def __call__(self, inputs: np.ndarray | bytes | str | dict, **kwargs: Any) -> list[dict[str, Any]]:
         """
         Classify the sequence(s) given as inputs. See the [`AutomaticSpeechRecognitionPipeline`] documentation for more
         information.
@@ -130,7 +128,7 @@ class AudioClassificationPipeline(Pipeline):
                 The number of top labels that will be returned by the pipeline. If the provided number is `None` or
                 higher than the number of labels available in the model configuration, it will default to the number of
                 labels.
-            function_to_apply(`str`, *optional*, defaults to "softmax"):
+            function_to_apply (`str`, *optional*, defaults to "softmax"):
                 The function to apply to the model output. By default, the pipeline will apply the softmax function to
                 the output of the model. Valid options: ["softmax", "sigmoid", "none"]. Note that passing Python's
                 built-in `None` will default to "softmax", so you need to pass the string "none" to disable any
@@ -171,7 +169,7 @@ class AudioClassificationPipeline(Pipeline):
             if inputs.startswith("http://") or inputs.startswith("https://"):
                 # We need to actually check for a real protocol, otherwise it's impossible to use a local file
                 # like http_huggingface_co.png
-                inputs = requests.get(inputs).content
+                inputs = httpx.get(inputs, follow_redirects=True).content
             else:
                 with open(inputs, "rb") as f:
                     inputs = f.read()

@@ -24,10 +24,12 @@ from transformers import (
     is_torch_available,
 )
 from transformers.testing_utils import (
+    Expectations,
     cleanup,
+    require_deterministic_for_xpu,
     require_flash_attn,
     require_torch,
-    require_torch_gpu,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
@@ -71,7 +73,7 @@ class Glm4vVisionText2TextModelTester:
             "output_channels": 64,
             "hidden_act": "silu",
             "max_position_embeddings": 512,
-            "rope_scaling": {"type": "default", "mrope_section": [2, 1, 1]},
+            "rope_parameters": {"type": "default", "mrope_section": [2, 1, 1]},
             "rope_theta": 10000,
             "tie_word_embeddings": True,
             "bos_token_id": 0,
@@ -157,6 +159,9 @@ class Glm4vVisionText2TextModelTester:
         patch_size = config.vision_config.patch_size
         patches_per_side = self.image_size // patch_size
 
+        mm_token_type_ids = torch.zeros_like(input_ids)
+        mm_token_type_ids[:, 1 : 1 + self.num_image_tokens] = 1
+
         inputs_dict = {
             "pixel_values": pixel_values,
             "image_grid_thw": torch.tensor(
@@ -164,6 +169,7 @@ class Glm4vVisionText2TextModelTester:
             ),
             "input_ids": input_ids,
             "attention_mask": attention_mask,
+            "mm_token_type_ids": mm_token_type_ids,
         }
         return config, inputs_dict
 
@@ -171,9 +177,7 @@ class Glm4vVisionText2TextModelTester:
 @require_torch
 class Glm4vModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
     all_model_classes = (Glm4vModel, Glm4vForConditionalGeneration) if is_torch_available() else ()
-    test_pruning = False
-    test_head_masking = False
-    test_torchscript = False
+
     model_split_percents = [0.7, 0.9]  # model too big to split at 0.5
     _is_composite = True
 
@@ -191,9 +195,6 @@ class Glm4vModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase)
         # We don't want a few model inputs in our model input dictionary for generation tests
         input_keys_to_ignore = [
             # we don't want to mask attention heads
-            "head_mask",
-            "decoder_head_mask",
-            "cross_attn_head_mask",
             # we don't want encoder-decoder models to start from filled decoder ids
             "decoder_input_ids",
             "decoder_attention_mask",
@@ -279,6 +280,52 @@ class Glm4vModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase)
                 out_ids = model(input_ids=input_ids, **inputs)[0]
                 out_embeds = model(inputs_embeds=inputs_embeds, **inputs)[0]
             torch.testing.assert_close(out_embeds, out_ids)
+
+    def test_vision_position_ids(self):
+        """
+        Tests that vision position ids are built correctly for images and for videos.
+        See https://github.com/huggingface/transformers/pull/45400
+        """
+        config, input_dict = self.model_tester.prepare_config_and_inputs_for_common()
+        model = Glm4vModel(config).to(torch_device)
+
+        # Each image encodes to more than 1 token (i.e. 4 height and 3 width patches = 12 tokens)
+        image_token_id = config.image_token_id
+        pad_token_id = config.text_config.pad_token_id
+        input_ids = torch.tensor([[pad_token_id] + [image_token_id] * 12 + [pad_token_id]], device=torch_device)
+        mm_token_type_ids = torch.tensor([[0] + [1] * 12 + [0]], device=torch_device)
+        image_grid_thw = torch.tensor([[1, 4, 3]], device=torch_device)
+        position_ids = model.get_rope_index(input_ids, mm_token_type_ids, image_grid_thw)[0]
+        expected_positions = torch.tensor(
+            [
+                [[0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 5]],
+                [[0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5]],
+                [[0, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 5]],
+            ]
+        )
+
+        self.assertListEqual(list(position_ids.shape), [3, 1, 14])
+        self.assertListEqual(position_ids.tolist(), expected_positions.tolist())
+
+        # Check video position ids with 2 frames, and 4 height, 3 width patches (= 12 * 2 tokens)
+        video_token_id = config.video_token_id
+        input_ids = torch.tensor(
+            [[pad_token_id] + [video_token_id] * 12 + [pad_token_id] + [video_token_id] * 12 + [pad_token_id]],
+            device=torch_device,
+        )
+        mm_token_type_ids = torch.tensor([[0] + [2] * 12 + [0] + [2] * 12 + [0]], device=torch_device)
+        video_grid_thw = torch.tensor([[2, 4, 3]], device=torch_device)
+        position_ids = model.get_rope_index(input_ids, mm_token_type_ids, video_grid_thw=video_grid_thw)[0]
+        expected_positions = torch.tensor(
+            [
+                [[0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 10]],
+                [[0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10]],
+                [[0, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 5, 6, 7, 8, 6, 7, 8, 6, 7, 8, 6, 7, 8, 10]],
+            ]
+        )
+
+        self.assertListEqual(list(position_ids.shape), [3, 1, 27])
+        self.assertListEqual(position_ids.tolist(), expected_positions.tolist())
 
 
 @require_torch
@@ -418,6 +465,7 @@ class Glm4vIntegrationTest(unittest.TestCase):
         )
 
     @slow
+    @require_deterministic_for_xpu
     def test_small_model_integration_test_expand(self):
         model = Glm4vForConditionalGeneration.from_pretrained(
             "THUDM/GLM-4.1V-9B-Thinking", dtype="auto", device_map="auto"
@@ -431,14 +479,23 @@ class Glm4vIntegrationTest(unittest.TestCase):
 
         output = model.generate(**inputs, max_new_tokens=30, do_sample=False, num_beams=2, num_return_sequences=2)
 
-        EXPECTED_DECODED_TEXT = [
-            "\nWhat kind of dog is this?\n<think>Got it, let's look at the image. The animal in the picture doesn't look like a dog; it's actually a cat. Specifically",
-            "\nWhat kind of dog is this?\n<think>Got it, let's look at the image. The animal in the picture doesn't look like a dog; it's actually a cat, specifically"
-        ]  # fmt: skip
-        self.assertEqual(
-            self.processor.batch_decode(output, skip_special_tokens=True),
-            EXPECTED_DECODED_TEXT,
+        # fmt: off
+        EXPECTED_DECODED_TEXTS = Expectations(
+            {
+
+                (None, None): ["\nWhat kind of dog is this?\n<think>Got it, let's look at the image. The animal in the picture doesn't look like a dog; it's actually a cat. Specifically",
+                               "\nWhat kind of dog is this?\n<think>Got it, let's look at the image. The animal in the picture doesn't look like a dog; it's actually a cat, specifically"
+                              ],
+                ("xpu", None): ["\nWhat kind of dog is this?\n<think>Got it, let's look at the image. The animal in the picture is not a dog; it's a cat. Specifically, it looks",
+                                "\nWhat kind of dog is this?\n<think>Got it, let's look at the image. The animal in the picture is not a dog; it's a cat, specifically a Pallas"
+                               ],
+            }
         )
+        # fmt: on
+        EXPECTED_DECODED_TEXT = EXPECTED_DECODED_TEXTS.get_expectation()
+
+        decoded_text = self.processor.batch_decode(output, skip_special_tokens=True)
+        self.assertEqual(decoded_text, EXPECTED_DECODED_TEXT)
 
     @slow
     def test_small_model_integration_test_batch_wo_image(self):
@@ -505,7 +562,7 @@ class Glm4vIntegrationTest(unittest.TestCase):
 
     @slow
     @require_flash_attn
-    @require_torch_gpu
+    @require_torch_accelerator
     def test_small_model_integration_test_batch_flashatt2(self):
         model = Glm4vForConditionalGeneration.from_pretrained(
             "THUDM/GLM-4.1V-9B-Thinking",
@@ -540,7 +597,7 @@ class Glm4vIntegrationTest(unittest.TestCase):
 
     @slow
     @require_flash_attn
-    @require_torch_gpu
+    @require_torch_accelerator
     def test_small_model_integration_test_batch_wo_image_flashatt2(self):
         model = Glm4vForConditionalGeneration.from_pretrained(
             "THUDM/GLM-4.1V-9B-Thinking",

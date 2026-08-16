@@ -44,7 +44,7 @@ if is_torch_available():
 if is_vision_available():
     from PIL import Image
 
-    from transformers import LevitImageProcessor
+    from transformers import LevitImageProcessorPil
 
 
 class LevitConfigTester(ConfigTester):
@@ -182,10 +182,7 @@ class LevitModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
         else {}
     )
 
-    test_pruning = False
-    test_torchscript = False
     test_resize_embeddings = False
-    test_head_masking = False
     has_attentions = False
 
     def setUp(self):
@@ -389,7 +386,7 @@ def prepare_img():
 class LevitModelIntegrationTest(unittest.TestCase):
     @cached_property
     def default_image_processor(self):
-        return LevitImageProcessor.from_pretrained("facebook/levit-128S")
+        return LevitImageProcessorPil.from_pretrained("facebook/levit-128S")
 
     @slow
     def test_inference_image_classification_head(self):

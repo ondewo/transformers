@@ -5,7 +5,7 @@ http://www.apache.org/licenses/LICENSE-2.0
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
 an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
-⚠️ Note that this file is in Markdown but contain specific syntax for our doc-builder (similar to MDX) that may not be
+⚠️ Note that this file is in Markdown but contains specific syntax for our doc-builder (similar to MDX) that may not be
 rendered properly in your Markdown viewer.
 -->
 
@@ -66,6 +66,7 @@ For 2 bits, we recommend using `auto-round-best` or `auto-round`.
 <hfoption id="quantization auto-round api">
 
 ### AutoRound API Usage
+
 This setting offers a better trade-off between accuracy and tuning cost, and is recommended in all scenarios.
 
 ```python
@@ -98,6 +99,7 @@ autoround.quantize_and_save(output_dir, format='auto_round')
 <hfoption id="quantization auto-round-best">
 
 ### AutoRoundBest recipe
+
 This setting provides the best accuracy in most scenarios but is 4–5× slower than the standard AutoRound recipe. It is especially recommended for 2-bit quantization and is a good choice if sufficient resources are available.
 
 ```python
@@ -128,6 +130,7 @@ autoround.quantize_and_save(output_dir, format='auto_round')
 <hfoption id="quantization auto-round-light">
 
 ### AutoRoundLight recipe
+
 This setting offers the best speed (2 - 3X faster than AutoRound), but it may cause a significant accuracy drop for small models and 2-bit quantization. It is recommended for 4-bit settings and models larger than 3B.
 
 ```python
@@ -173,7 +176,7 @@ AutoRound automatically selects the best available backend based on the installe
 
 ### CPU
 
-Supports 2, 4, and 8 bits. We recommend using intel-extension-for-pytorch (IPEX) for 4 bits inference.
+Supports 2, 4, and 8 bits. We recommend using the AutoRound Kernel (ARK) backend for inference. PyTorch 2.8.0 or later is required with ARK.
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -192,7 +195,7 @@ print(tokenizer.decode(model.generate(**inputs, max_new_tokens=50, do_sample=Fal
 
 ### XPU
 
-Supports 4 bits only. We recommend using intel-extension-for-pytorch (IPEX) for inference.
+Supports 4 and 8 bits. We recommend using the AutoRound Kernel (ARK) backend for inference. PyTorch 2.8.0 or later is required with ARK.
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -233,13 +236,13 @@ print(tokenizer.decode(model.generate(**inputs, max_new_tokens=50, do_sample=Fal
 AutoRound automatically selects the backend for each layer based on compatibility. In general, the priority order is Marlin > ExLLaMAV2 > Triton, but the final choice depends on factors such as group size, bit width, packing format, hardware device, and other implementation details. For more details, please refer to [backends](https://github.com/intel/auto-round?tab=readme-ov-file#specify-backend),
 
 The backend may not always be the most suitable for certain devices.
-You can specify your preferred backend such as "ipex" for CPU, "ipex/triton" for XPU, "marlin/exllamav2/triton" for CUDA, according to your needs or hardware compatibility. Please note that additional corresponding libraries may be required.
+You can specify your preferred backend such as "ark" for CPU and XPU, or "marlin/exllamav2/triton" for CUDA, according to your needs or hardware compatibility. Please note that additional corresponding libraries may be required.
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoRoundConfig
 
 model_name = "OPEA/Qwen2.5-1.5B-Instruct-int4-sym-inc"
-quantization_config = AutoRoundConfig(backend="ipex")
+quantization_config = AutoRoundConfig(backend="ark")
 model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", quantization_config=quantization_config, dtype="auto")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 text = "There is a girl who likes adventure,"
@@ -279,8 +282,10 @@ If you encounter any issues with auto-round, please open an issue on
 the [AutoRound](https://github.com/intel/auto-round/issues) repository.
 
 ## Acknowledgement
+
 Special thanks to open-source low precision libraries such as AutoGPTQ, AutoAWQ, GPTQModel, Triton, Marlin, and ExLLaMAV2 for providing low-precision CUDA kernels, which are leveraged in AutoRound.
 
 ## Contribution
+
 Contributions to [AutoRound](https://github.com/intel/auto-round/pulls) are welcome and greatly appreciated!
 Whether it's fixing bugs, improving documentation, adding new features, or suggesting improvements, your help is always valued.

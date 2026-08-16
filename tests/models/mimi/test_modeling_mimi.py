@@ -14,7 +14,6 @@
 """Testing suite for the PyTorch Mimi model."""
 
 import inspect
-import os
 import tempfile
 import unittest
 
@@ -23,19 +22,22 @@ import pytest
 from datasets import Audio, load_dataset
 from pytest import mark
 
-from transformers import AutoFeatureExtractor, MimiConfig
+from tests.utils.test_audio_utils import normalize_waveform
+from transformers import AutoFeatureExtractor, MimiConfig, set_seed
+from transformers.audio_utils import load_audio
 from transformers.testing_utils import (
+    Expectations,
     is_flaky,
     is_torch_available,
     require_flash_attn,
     require_torch,
-    require_torch_gpu,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
 
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, _config_zero_init, floats_tensor, ids_tensor
+from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
 
 
 if is_torch_available():
@@ -52,9 +54,6 @@ def prepare_inputs_dict(
     decoder_input_ids=None,
     attention_mask=None,
     decoder_attention_mask=None,
-    head_mask=None,
-    decoder_head_mask=None,
-    cross_attn_head_mask=None,
 ):
     if input_ids is not None:
         encoder_dict = {"input_ids": input_ids}
@@ -88,6 +87,7 @@ class MimiModelTester:
         num_key_value_heads=2,
         sliding_window=4,
         use_cache=False,
+        max_position_embeddings=512,
     ):
         self.parent = parent
         self.batch_size = batch_size
@@ -107,6 +107,7 @@ class MimiModelTester:
         self.num_key_value_heads = num_key_value_heads
         self.sliding_window = sliding_window
         self.use_cache = use_cache
+        self.max_position_embeddings = max_position_embeddings
 
     def prepare_config_and_inputs(self, input_values_length=None):
         input_values = floats_tensor(
@@ -135,6 +136,7 @@ class MimiModelTester:
 
     def get_config(self):
         return MimiConfig(
+            max_position_embeddings=self.max_position_embeddings,
             audio_channels=self.num_channels,
             chunk_in_sec=None,
             hidden_size=self.hidden_size,
@@ -166,10 +168,9 @@ class MimiModelTester:
 class MimiModelTest(ModelTesterMixin, unittest.TestCase):
     all_model_classes = (MimiModel,) if is_torch_available() else ()
     is_encoder_decoder = True
-    test_pruning = False
-    test_headmasking = False
+
     test_resize_embeddings = False
-    test_torchscript = False
+    test_torch_exportable = False  # data-dependent guard in conv padding (`u0 + u1 + 2 < 7`)
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
         # model does support returning hidden states
@@ -183,7 +184,7 @@ class MimiModelTest(ModelTesterMixin, unittest.TestCase):
     def setUp(self):
         self.model_tester = MimiModelTester(self)
         self.config_tester = ConfigTester(
-            self, config_class=MimiConfig, hidden_size=37, common_properties=[], has_text_modality=False
+            self, config_class=MimiConfig, hidden_size=32, common_properties=[], has_text_modality=False
         )
 
     def test_config(self):
@@ -216,105 +217,6 @@ class MimiModelTest(ModelTesterMixin, unittest.TestCase):
     @unittest.skip(reason="The MimiModel does not have the usual `attention` logic")
     def test_retain_grad_hidden_states_attentions(self):
         pass
-
-    @unittest.skip(reason="The MimiModel does not have the usual `attention` logic")
-    def test_torchscript_output_attentions(self):
-        pass
-
-    @unittest.skip(reason="The MimiModel does not have the usual `hidden_states` logic")
-    def test_torchscript_output_hidden_state(self):
-        pass
-
-    # Copied from transformers.tests.encodec.test_modeling_encodec.MimiModelTest._create_and_check_torchscript
-    def _create_and_check_torchscript(self, config, inputs_dict):
-        if not self.test_torchscript:
-            self.skipTest(reason="test_torchscript is set to False")
-
-        configs_no_init = _config_zero_init(config)  # To be sure we have no Nan
-        configs_no_init.torchscript = True
-        configs_no_init.return_dict = False
-        for model_class in self.all_model_classes:
-            model = model_class(config=configs_no_init)
-            model.to(torch_device)
-            model.eval()
-            inputs = self._prepare_for_class(inputs_dict, model_class)
-
-            main_input_name = model_class.main_input_name
-
-            try:
-                main_input = inputs[main_input_name]
-                model(main_input)
-                traced_model = torch.jit.trace(model, main_input)
-            except RuntimeError:
-                self.fail("Couldn't trace module.")
-
-            with tempfile.TemporaryDirectory() as tmp_dir_name:
-                pt_file_name = os.path.join(tmp_dir_name, "traced_model.pt")
-
-                try:
-                    torch.jit.save(traced_model, pt_file_name)
-                except Exception:
-                    self.fail("Couldn't save module.")
-
-                try:
-                    loaded_model = torch.jit.load(pt_file_name)
-                except Exception:
-                    self.fail("Couldn't load module.")
-
-            model.to(torch_device)
-            model.eval()
-
-            loaded_model.to(torch_device)
-            loaded_model.eval()
-
-            model_state_dict = model.state_dict()
-            loaded_model_state_dict = loaded_model.state_dict()
-
-            non_persistent_buffers = {}
-            for key in loaded_model_state_dict:
-                if key not in model_state_dict:
-                    non_persistent_buffers[key] = loaded_model_state_dict[key]
-
-            loaded_model_state_dict = {
-                key: value for key, value in loaded_model_state_dict.items() if key not in non_persistent_buffers
-            }
-
-            self.assertEqual(set(model_state_dict.keys()), set(loaded_model_state_dict.keys()))
-
-            model_buffers = list(model.buffers())
-            for non_persistent_buffer in non_persistent_buffers.values():
-                found_buffer = False
-                for i, model_buffer in enumerate(model_buffers):
-                    if torch.equal(non_persistent_buffer, model_buffer):
-                        found_buffer = True
-                        break
-
-                self.assertTrue(found_buffer)
-                model_buffers.pop(i)
-
-            model_buffers = list(model.buffers())
-            for non_persistent_buffer in non_persistent_buffers.values():
-                found_buffer = False
-                for i, model_buffer in enumerate(model_buffers):
-                    if torch.equal(non_persistent_buffer, model_buffer):
-                        found_buffer = True
-                        break
-
-                self.assertTrue(found_buffer)
-                model_buffers.pop(i)
-
-            models_equal = True
-            for layer_name, p1 in model_state_dict.items():
-                if layer_name in loaded_model_state_dict:
-                    p2 = loaded_model_state_dict[layer_name]
-                    if p1.data.ne(p2.data).sum() > 0:
-                        models_equal = False
-
-            self.assertTrue(models_equal)
-
-            # Avoid memory leak. Without this, each call increase RAM usage by ~20MB.
-            # (Even with this call, there are still memory leak by ~0.04MB)
-            self.clear_torch_jit_class_registry()
 
     @unittest.skip(reason="The MimiModel does not have the usual `attention` logic")
     def test_attention_outputs(self):
@@ -396,12 +298,14 @@ class MimiModelTest(ModelTesterMixin, unittest.TestCase):
         self.model_tester.create_and_check_model_forward(config, inputs_dict)
 
     @require_flash_attn
-    @require_torch_gpu
+    @require_torch_accelerator
     @mark.flash_attn_test
     @slow
     @is_flaky()
     def test_flash_attn_2_inference_equivalence(self):
         for model_class in self.all_model_classes:
+            # Set seed for deterministic test - ensures reproducible model initialization and inputs
+            set_seed(42)
             config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
             model = model_class(config)
 
@@ -437,18 +341,8 @@ class MimiModelTest(ModelTesterMixin, unittest.TestCase):
         pass
 
 
-# Copied from transformers.tests.encodec.test_modeling_encodec.normalize
-def normalize(arr):
-    norm = np.linalg.norm(arr)
-    normalized_arr = arr / norm
-    return normalized_arr
-
-
-# Copied from transformers.tests.encodec.test_modeling_encodec.compute_rmse
 def compute_rmse(arr1, arr2):
-    arr1_normalized = normalize(arr1)
-    arr2_normalized = normalize(arr2)
-    return np.sqrt(((arr1_normalized - arr2_normalized) ** 2).mean())
+    return np.sqrt(((normalize_waveform(arr1) - normalize_waveform(arr2)) ** 2).mean())
 
 
 @slow
@@ -606,5 +500,77 @@ class MimiIntegrationTest(unittest.TestCase):
 
                 # make sure audios are more or less equal
                 # the RMSE of two random gaussian noise vectors with ~N(0, 1) is around 1.0
+                rmse = compute_rmse(arr, arr_enc_dec)
+                self.assertTrue(np.abs(rmse - expected_rmse) < 1e-5)
+
+    def test_integration_longform(self):
+        """
+        Test Mimi on a longer audio (~45s) that exceeds the sliding window context (250 frames = 10s).
+        reproducer: https://gist.github.com/eustlb/34f79f34d423ccf8983c2c6c8dab2bcc
+        """
+
+        expected_rmses = Expectations(
+            {
+                (None, None): {
+                    "8": 0.00067151,
+                    "32": 0.00049521,
+                },
+                ("xpu", 5): {
+                    "8": 0.0006640465,
+                    "32": 0.000495249,
+                },
+            }
+        ).get_expectation()
+        expected_codesums = Expectations(
+            {
+                (None, None): {
+                    "8": 4621433,
+                    "32": 18446927,
+                },
+                ("xpu", 5): {
+                    "8": 4578159,
+                    "32": 18459628,
+                },
+            }
+        ).get_expectation()
+
+        model_id = "kyutai/mimi"
+
+        processor = AutoFeatureExtractor.from_pretrained(model_id)
+        audio_sample = load_audio(
+            "https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/obama_first_45_secs.mp3",
+            processor.sampling_rate,
+        )
+
+        inputs = processor(
+            raw_audio=audio_sample,
+            sampling_rate=processor.sampling_rate,
+            return_tensors="pt",
+        ).to(torch_device)
+
+        for use_cache in [False, True]:
+            model = MimiModel.from_pretrained(model_id, use_cache=use_cache).to(torch_device)
+            for num_codebooks, expected_rmse in expected_rmses.items():
+                with torch.no_grad():
+                    encoder_outputs = model.encode(inputs["input_values"], num_quantizers=int(num_codebooks))
+
+                    audio_code_sums = encoder_outputs[0].sum().item()
+
+                    self.assertTrue(
+                        np.abs(audio_code_sums - expected_codesums[num_codebooks]) <= (3e-3 * audio_code_sums)
+                    )
+
+                    input_values_dec = model.decode(encoder_outputs[0], padding_mask=inputs["padding_mask"])[0]
+                    input_values_enc_dec = model(
+                        inputs["input_values"], inputs["padding_mask"], num_quantizers=int(num_codebooks)
+                    )[1]
+
+                torch.testing.assert_close(input_values_dec, input_values_enc_dec)
+
+                self.assertTrue(inputs["input_values"].shape == input_values_enc_dec.shape)
+
+                arr = inputs["input_values"][0].cpu().numpy()
+                arr_enc_dec = input_values_enc_dec[0].cpu().numpy()
+
                 rmse = compute_rmse(arr, arr_enc_dec)
                 self.assertTrue(np.abs(rmse - expected_rmse) < 1e-5)

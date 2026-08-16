@@ -13,13 +13,10 @@ specific language governing permissions and limitations under the License.
 rendered properly in your Markdown viewer.
 
 -->
-*This model was released on 2023-04-18 and added to Hugging Face Transformers on 2023-07-03.*
+*This model was published in HF papers on 2023-04-18 and contributed to Hugging Face Transformers on 2023-07-03.*
 
 # UMT5
 
-<div class="flex flex-wrap space-x-1">
-<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
-</div>
 
 ## Overview
 
@@ -47,23 +44,25 @@ Therefore, this model has to be fine-tuned before it is usable on a downstream t
 fine-tuning. If you are doing multi-task fine-tuning, you should use a prefix.
 
 ## Differences with mT5?
+
 `UmT5` is based on mT5, with a non-shared relative positional bias that is computed for each layer. This means that the model set `has_relative_bias` for each layer.
 The conversion script is also different because the model was saved in t5x's latest checkpointing format.
 
 # Sample usage
 
 ```python
->>> from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
->>> model = AutoModelForSeq2SeqLM.from_pretrained("google/umt5-small")
->>> tokenizer = AutoTokenizer.from_pretrained("google/umt5-small")
 
->>> inputs = tokenizer(
-...     "A <extra_id_0> walks into a bar and orders a <extra_id_1> with <extra_id_2> pinch of <extra_id_3>.",
-...     return_tensors="pt",
-... )
->>> outputs = model.generate(**inputs)
->>> print(tokenizer.batch_decode(outputs))
+model = AutoModelForSeq2SeqLM.from_pretrained("google/umt5-small", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("google/umt5-small")
+
+inputs = tokenizer(
+    "A <extra_id_0> walks into a bar and orders a <extra_id_1> with <extra_id_2> pinch of <extra_id_3>.",
+    return_tensors="pt",
+)
+outputs = model.generate(**inputs)
+print(tokenizer.batch_decode(outputs))
 ['<pad><extra_id_0>nyone who<extra_id_1> drink<extra_id_2> a<extra_id_3> alcohol<extra_id_4> A<extra_id_5> A. This<extra_id_6> I<extra_id_7><extra_id_52><extra_id_53></s>']
 ```
 

@@ -17,10 +17,9 @@ import gc
 import unittest
 
 import pytest
-from packaging import version
 from parameterized import parameterized
 
-from transformers import AutoTokenizer, DynamicCache, is_torch_available, set_seed
+from transformers import AutoTokenizer, BitsAndBytesConfig, DynamicCache, is_torch_available, set_seed
 from transformers.cache_utils import DynamicSlidingWindowLayer
 from transformers.testing_utils import (
     DeviceProperties,
@@ -30,7 +29,6 @@ from transformers.testing_utils import (
     get_device_properties,
     require_bitsandbytes,
     require_flash_attn,
-    require_read_token,
     require_torch,
     require_torch_accelerator,
     slow,
@@ -43,9 +41,6 @@ if is_torch_available():
 
     from transformers import (
         MistralForCausalLM,
-        MistralForQuestionAnswering,
-        MistralForSequenceClassification,
-        MistralForTokenClassification,
         MistralModel,
     )
 from ...causal_lm_tester import CausalLMModelTest, CausalLMModelTester
@@ -58,17 +53,6 @@ class MistralModelTester(CausalLMModelTester):
 
 @require_torch
 class MistralModelTest(CausalLMModelTest, unittest.TestCase):
-    pipeline_model_mapping = (
-        {
-            "feature-extraction": MistralModel,
-            "text-classification": MistralForSequenceClassification,
-            "token-classification": MistralForTokenClassification,
-            "text-generation": MistralForCausalLM,
-            "question-answering": MistralForQuestionAnswering,
-        }
-        if is_torch_available()
-        else {}
-    )
     model_tester_class = MistralModelTester
 
     # TODO (ydshieh): Check this. See https://app.circleci.com/pipelines/github/huggingface/transformers/79245/workflows/9490ef58-79c2-410d-8f51-e3495156cf9c/jobs/1012146
@@ -86,7 +70,6 @@ class MistralModelTest(CausalLMModelTest, unittest.TestCase):
 
 
 @require_torch_accelerator
-@require_read_token
 class MistralIntegrationTest(unittest.TestCase):
     # This variable is used to determine which accelerator are we using for our runners (e.g. A10 or T4)
     # Depending on the hardware we get different logits / generations
@@ -136,7 +119,9 @@ class MistralIntegrationTest(unittest.TestCase):
         prompt = "My favourite condiment is "
         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=False)
         model = MistralForCausalLM.from_pretrained(
-            "mistralai/Mistral-7B-v0.1", device_map={"": torch_device}, load_in_4bit=True
+            "mistralai/Mistral-7B-v0.1",
+            device_map={"": torch_device},
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
         )
         input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.model.embed_tokens.weight.device)
 
@@ -144,35 +129,6 @@ class MistralIntegrationTest(unittest.TestCase):
         generated_ids = model.generate(input_ids, max_new_tokens=20, temperature=0)
         text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
         self.assertEqual(EXPECTED_TEXT_COMPLETION, text)
-
-    # TODO joao, manuel: remove this in v4.62.0
-    @slow
-    def test_model_7b_dola_generation(self):
-        # ground truth text generated with dola_layers="low", repetition_penalty=1.2
-        EXPECTED_TEXT_COMPLETION = (
-            """My favourite condiment is 100% ketchup. I love it on everything, and I’m not ash"""
-        )
-        prompt = "My favourite condiment is "
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=False)
-        model = MistralForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1", device_map="auto", dtype=torch.float16)
-        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.model.embed_tokens.weight.device)
-
-        # greedy generation outputs
-        generated_ids = model.generate(
-            input_ids,
-            max_new_tokens=20,
-            temperature=0,
-            dola_layers="low",
-            repetition_penalty=1.2,
-            trust_remote_code=True,
-            custom_generate="transformers-community/dola",
-        )
-        text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        self.assertEqual(EXPECTED_TEXT_COMPLETION, text)
-
-        del model
-        backend_empty_cache(torch_device)
-        gc.collect()
 
     @require_flash_attn
     @require_bitsandbytes
@@ -185,7 +141,7 @@ class MistralIntegrationTest(unittest.TestCase):
         model = MistralForCausalLM.from_pretrained(
             "mistralai/Mistral-7B-v0.1",
             device_map={"": torch_device},
-            load_in_4bit=True,
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
             attn_implementation="flash_attention_2",
         )
         input_ids = torch.tensor([input_ids]).to(model.model.embed_tokens.weight.device)
@@ -243,7 +199,7 @@ class MistralIntegrationTest(unittest.TestCase):
         input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.model.embed_tokens.weight.device)
 
         # greedy generation outputs
-        set_seed(0)
+        set_seed(42)
         generated_ids = model.generate(
             input_ids, max_new_tokens=20, do_sample=True, temperature=0.3, assistant_model=model
         )
@@ -253,11 +209,6 @@ class MistralIntegrationTest(unittest.TestCase):
     @pytest.mark.torch_compile_test
     @slow
     def test_compile_static_cache(self):
-        # `torch==2.2` will throw an error on this test (as in other compilation tests), but torch==2.1.2 and torch>2.2
-        # work as intended. See https://github.com/pytorch/pytorch/issues/121943
-        if version.parse(torch.__version__) < version.parse("2.3.0"):
-            self.skipTest(reason="This test requires torch >= 2.3 to run.")
-
         if self.device_properties[0] == "cuda" and self.device_properties[1] == 7:
             self.skipTest(reason="This test is failing (`torch.compile` fails) on Nvidia T4 GPU.")
 
@@ -312,6 +263,7 @@ class MistralIntegrationTest(unittest.TestCase):
         static_compiled_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
         self.assertEqual(EXPECTED_TEXT_COMPLETION, static_compiled_text)
 
+    @pytest.mark.flash_attn_test
     @parameterized.expand([("flash_attention_2",), ("sdpa",), ("flex_attention",), ("eager",)])
     @require_flash_attn
     @slow

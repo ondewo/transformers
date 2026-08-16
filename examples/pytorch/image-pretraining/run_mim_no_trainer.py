@@ -14,7 +14,7 @@
 
 # /// script
 # dependencies = [
-#     "transformers==4.57.6",
+#     "transformers @ git+https://github.com/huggingface/transformers.git",
 #     "torch>=1.5.0",
 #     "torchvision>=0.6.0",
 #     "datasets>=1.8.0",
@@ -34,6 +34,7 @@ from accelerate import Accelerator, DistributedType
 from accelerate.utils import set_seed
 from datasets import load_dataset
 from huggingface_hub import HfApi
+from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, Lambda, Normalize, RandomHorizontalFlip, RandomResizedCrop, ToTensor
 from tqdm.auto import tqdm
@@ -49,6 +50,7 @@ from transformers import (
     SchedulerType,
     get_scheduler,
 )
+from transformers.trainer_pt_utils import get_parameter_names
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
@@ -61,7 +63,7 @@ Any model supported by the AutoModelForMaskedImageModeling API can be used.
 logger = logging.getLogger(__name__)
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.57.0")
+check_min_version("4.57.0.dev0")
 
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/image-pretraining/requirements.txt")
 
@@ -588,14 +590,15 @@ def main():
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
-    no_decay = ["bias", "LayerNorm.weight"]
+    forbidden_name_patterns = [r"bias", r"layernorm", r"rmsnorm", r"(?:^|\.)norm(?:$|\.)", r"_norm(?:$|\.)"]
+    decay_parameters = get_parameter_names(model, [nn.LayerNorm], forbidden_layer_names=forbidden_name_patterns)
     optimizer_grouped_parameters = [
         {
-            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "params": [p for n, p in model.named_parameters() if n in decay_parameters and p.requires_grad],
             "weight_decay": args.weight_decay,
         },
         {
-            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            "params": [p for n, p in model.named_parameters() if n not in decay_parameters and p.requires_grad],
             "weight_decay": 0.0,
         },
     ]

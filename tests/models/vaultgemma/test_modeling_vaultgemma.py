@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2025 the HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -33,7 +32,8 @@ from transformers.testing_utils import (
     Expectations,
     cleanup,
     is_flash_attn_2_available,
-    require_read_token,
+    is_kernels_available,
+    is_torch_xpu_available,
     require_torch,
     require_torch_accelerator,
     slow,
@@ -47,7 +47,6 @@ if is_torch_available():
     import torch
 
     from transformers import (
-        VaultGemmaForCausalLM,
         VaultGemmaModel,
     )
 
@@ -59,15 +58,6 @@ class VaultGemmaModelTester(CausalLMModelTester):
 
 @require_torch
 class VaultGemmaModelTest(CausalLMModelTest, unittest.TestCase):
-    pipeline_model_mapping = (
-        {
-            "feature-extraction": VaultGemmaModel,
-            "text-generation": VaultGemmaForCausalLM,
-        }
-        if is_torch_available()
-        else {}
-    )
-
     _is_stateful = True
     model_split_percents = [0.5, 0.6]
     model_tester_class = VaultGemmaModelTester
@@ -84,7 +74,6 @@ class VaultGemmaIntegrationTest(unittest.TestCase):
     def tearDown(self):
         cleanup(torch_device, gc_collect=True)
 
-    @require_read_token
     def test_model_bf16(self):
         model_id = "google/vaultgemma-1b"
         EXPECTED_TEXTS = [
@@ -104,7 +93,6 @@ class VaultGemmaIntegrationTest(unittest.TestCase):
 
         self.assertEqual(output_text, EXPECTED_TEXTS)
 
-    @require_read_token
     def test_model_pipeline_bf16(self):
         model_id = "google/vaultgemma-1b"
         # EXPECTED_TEXTS should match the same non-pipeline test, minus the special tokens
@@ -124,7 +112,6 @@ class VaultGemmaIntegrationTest(unittest.TestCase):
 
     @pytest.mark.torch_export_test
     @slow
-    @require_read_token
     def test_export_static_cache(self):
         if version.parse(torch.__version__) < version.parse("2.5.0"):
             self.skipTest(reason="This test requires torch >= 2.5 to run.")
@@ -187,7 +174,6 @@ class VaultGemmaIntegrationTest(unittest.TestCase):
         self.assertEqual(EXPECTED_TEXT_COMPLETION, ep_generated_text)
 
     @parameterized.expand([("flash_attention_2",), ("sdpa",), ("flex_attention",), ("eager",)])
-    @require_read_token
     def test_generation_beyond_sliding_window(self, attn_implementation: str):
         """Test that we can correctly generate beyond the sliding window. This is non trivial as
         we need to correctly slice the attention mask in all cases (because we use a hybrid cache).
@@ -199,11 +185,12 @@ class VaultGemmaIntegrationTest(unittest.TestCase):
                 reason="`flex_attention` gives `torch._inductor.exc.InductorError: RuntimeError: No valid triton configs. OutOfMemoryError: out of resource: triton_tem_fused_0 Required: 147456 Hardware limit:101376 Reducing block sizes or `num_stages` may help.`"
             )
 
-        if attn_implementation == "flash_attention_2" and not is_flash_attn_2_available():
+        if (
+            attn_implementation == "flash_attention_2"
+            and not is_flash_attn_2_available()
+            and not (is_torch_xpu_available() and is_kernels_available())
+        ):
             self.skipTest("FlashAttention2 is required for this test.")
-
-        if torch_device == "xpu" and attn_implementation == "flash_attention_2":
-            self.skipTest(reason="Intel XPU doesn't support flash_attention_2 as of now.")
 
         model_id = "google/vaultgemma-1b"
         EXPECTED_COMPLETIONS = [
@@ -233,7 +220,6 @@ class VaultGemmaIntegrationTest(unittest.TestCase):
         self.assertEqual(output_text, EXPECTED_COMPLETIONS)
 
     @parameterized.expand([("flash_attention_2",), ("sdpa",), ("flex_attention",), ("eager",)])
-    @require_read_token
     def test_generation_beyond_sliding_window_dynamic(self, attn_implementation: str):
         """
         Same as above, but explicitly setting the cache to Dynamic, as it's otherwise static by default for
@@ -245,11 +231,12 @@ class VaultGemmaIntegrationTest(unittest.TestCase):
                 reason="`flex_attention` gives `torch._inductor.exc.InductorError: RuntimeError: No valid triton configs. OutOfMemoryError: out of resource: triton_tem_fused_0 Required: 147456 Hardware limit:101376 Reducing block sizes or `num_stages` may help.`"
             )
 
-        if attn_implementation == "flash_attention_2" and not is_flash_attn_2_available():
+        if (
+            attn_implementation == "flash_attention_2"
+            and not is_flash_attn_2_available()
+            and not (is_torch_xpu_available() and is_kernels_available())
+        ):
             self.skipTest("FlashAttention2 is required for this test.")
-
-        if torch_device == "xpu" and attn_implementation == "flash_attention_2":
-            self.skipTest(reason="Intel XPU doesn't support flash_attention_2 as of now.")
 
         model_id = "google/vaultgemma-1b"
         EXPECTED_COMPLETIONS = [

@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2021 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -53,6 +52,7 @@ import packaging.version
 # All paths are defined with the intent that this script should be run from the root of the repo.
 PATH_TO_EXAMPLES = "examples/"
 PATH_TO_MODELS = "src/transformers/models"
+PATH_TO_UTILS = "utils"
 # This maps a type of file to the pattern to look for when searching where the version is defined, as well as the
 # template to follow when replacing it with the new version.
 REPLACE_PATTERNS = {
@@ -128,7 +128,8 @@ def global_version_update(version: str, patch: bool = False):
     """
     for pattern, fname in REPLACE_FILES.items():
         update_version_in_file(fname, version, pattern)
-    update_version_in_examples(version, patch=patch)
+    # REMOVED AFTER v5! Uncomment to start updating the version of the examples again
+    # update_version_in_examples(version, patch=patch)
 
 
 def remove_conversion_scripts():
@@ -140,6 +141,13 @@ def remove_conversion_scripts():
     model_dir = Path(PATH_TO_MODELS)
     for conversion_script in list(model_dir.glob("**/convert*.py")):
         conversion_script.unlink()
+
+
+def remove_internal_utils():
+    """
+    Delete internal utils that should not be included in releases for security reasons.
+    """
+    (Path(PATH_TO_UTILS) / "modular_model_detector.py").unlink()
 
 
 def get_version() -> packaging.version.Version:
@@ -180,8 +188,9 @@ def pre_release_work(patch: bool = False):
 
     print(f"Updating version to {version}.")
     global_version_update(version, patch=patch)
-    print("Deleting conversion scripts.")
+    print("Deleting conversion and internal utils scripts.")
     remove_conversion_scripts()
+    remove_internal_utils()
 
 
 def post_release_work():
